@@ -7,15 +7,21 @@ const { spawn } = require("child_process");
 const app = express();
 app.use(express.json({ limit: "50mb" }));
 
+// 🟢 PASSO 1: Expor a pasta temporária publicamente
+// Isso permite que a URL do vídeo gerado possa ser acessada pelo seu Webhook para download
+app.use("/videos", express.static("/tmp/video-worker"));
+
 // ---------- CONFIG (Render Env Vars) ----------
 const PORT = process.env.PORT || 3000;
+// 🟢 Nota: Deixei as variáveis do Supabase aqui caso você use em outro lugar, 
+// mas para o vídeo elas não serão mais necessárias neste Worker.
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const FINAL_BUCKET = process.env.FINAL_BUCKET || "final-videos";
 
-const DEFAULT_WIDTH = parseInt(process.env.DEFAULT_WIDTH || "720", 10); // Ajustado para Shorts
+const DEFAULT_WIDTH = parseInt(process.env.DEFAULT_WIDTH || "720", 10);
 const DEFAULT_HEIGHT = parseInt(process.env.DEFAULT_HEIGHT || "1280", 10);
-const DEFAULT_FPS = parseInt(process.env.DEFAULT_FPS || "30", 10); // Melhor fluidez
+const DEFAULT_FPS = parseInt(process.env.DEFAULT_FPS || "30", 10);
 // --------------------------------------------
 
 app.get("/", (req, res) => res.send("OK"));
@@ -41,6 +47,8 @@ async function downloadToFile(url, filePath) {
   });
 }
 
+// 🟢 Nota: A função uploadMp4ToSupabase foi mantida aqui caso precise no futuro, 
+// mas nós NÃO vamos mais chamá-la no final do processo.
 async function uploadMp4ToSupabase(localFilePath, objectPath) {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     throw new Error("SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY não configurados");
@@ -100,9 +108,8 @@ app.post("/render", async (req, res) => {
   const audio_url = body.audio_url;
   const output_config = body.output_config || {};
   
-  // 🔥 MUDANÇA CRUCIAL: Agora o worker escuta a timeline enviada pelo app
   const timeline = body.timeline || body.broll_timeline || output_config.timeline || [];
-  const broll_urls = body.broll_urls || []; // Ainda usado como fallback para download
+  const broll_urls = body.broll_urls || [];
   
   const subtitle_url = body.subtitle_url || output_config.subtitle_url;
   const subtitle_text = body.subtitle_text || output_config.subtitle_text;
@@ -126,7 +133,7 @@ app.post("/render", async (req, res) => {
     const srtPath = path.join(workDir, "subs.srt");
     
     let activeSubtitlePath = null;
-    const downloadedClipsMap = {}; // Guarda o caminho local para cada URL baixada
+    const downloadedClipsMap = {};
 
     try {
       console.log(`[job ${job_id}] --------------------------------------------------`);
@@ -136,7 +143,6 @@ app.post("/render", async (req, res) => {
       console.log(`[job ${job_id}] baixando áudio...`);
       await downloadToFile(audio_url, audioPath);
 
-      // 1. Baixar apenas os vídeos que estão na timeline (ou todos se não houver timeline)
       const urlsToDownload = new Set();
       if (timeline && timeline.length > 0) {
         timeline.forEach(clip => urlsToDownload.add(clip.url || clip.src));
@@ -150,14 +156,13 @@ app.post("/render", async (req, res) => {
       for (const url of urlsToDownload) {
         const cPath = path.join(workDir, `raw_${index}.mp4`);
         await downloadToFile(url, cPath);
-        downloadedClipsMap[url] = cPath; // Associa a URL ao arquivo local
+        downloadedClipsMap[url] = cPath;
         index++;
       }
 
       const normalizedClips = [];
       const vf = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},format=yuv420p`;
 
-      // 2. Aplicar os cortes EXATOS da timeline (Inteligência Artificial)
       if (timeline && timeline.length > 0) {
         console.log(`[job ${job_id}] Recortando clipes com base na timeline (Sem loop fixo)...`);
         
@@ -169,33 +174,30 @@ app.post("/render", async (req, res) => {
 
           const normPath = path.join(workDir, `slice_${i}.mp4`);
           const startTime = clip.start || clip.startTime || clip.ss || 0;
-          // Se o payload informar a duração exata do corte, use; se não, tente deduzir
           const duration = clip.duration || (clip.end ? clip.end - startTime : 3); 
           
           console.log(`[job ${job_id}] Cortando slice ${i}: início ${startTime}s, duração ${duration}s`);
           
-          // O Comando FFmpeg que respeita o nosso "offset dinâmico"
           await runFfmpeg([
             "-y", "-hide_banner", "-loglevel", "error",
-            "-ss", String(startTime), // Pula até o tempo correto (não é mais sempre zero)
-            "-t", String(duration),   // Corta a quantidade de segundos que pedimos (ex: 3s)
+            "-ss", String(startTime),
+            "-t", String(duration),  
             "-i", rawPath,
             "-vf", vf,
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-            "-an", // Remove o áudio original do TikTok
+            "-an", 
             normPath
           ]);
           normalizedClips.push(normPath);
         }
       } else {
-        // Fallback: Se o Lovable por algum motivo não mandar timeline, ele corta os 15 primeiros segs
         console.log(`[job ${job_id}] AVISO: Nenhuma timeline enviada. Processando clipes crus com corte base.`);
         let i = 0;
         for (const url in downloadedClipsMap) {
            const normPath = path.join(workDir, `slice_${i}.mp4`);
            await runFfmpeg([
             "-y", "-hide_banner", "-loglevel", "error",
-            "-t", "15", // Pega mais tempo para evitar buracos
+            "-t", "15", 
             "-i", downloadedClipsMap[url],
             "-vf", vf,
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
@@ -207,8 +209,6 @@ app.post("/render", async (req, res) => {
         }
       }
 
-      // 3. Montar a Playlist
-      // Sem loops malucos! Ele vai simplesmente juntar as fatias ordenadas na timeline
       const playlistPath = path.join(workDir, "playlist.txt");
       let playlistContent = "";
       
@@ -235,15 +235,10 @@ app.post("/render", async (req, res) => {
         "-i", audioPath 
       ];
 
-      // Legenda intocada conforme o seu estilo!
-     if (activeSubtitlePath) {
-        // Ignoramos a variável do app e travamos a margem em 50 (Centro)
+      if (activeSubtitlePath) {
         let marginV = 50; 
-
         const forceStyle = `Alignment=2,MarginV=${marginV},Fontname=Montserrat,Bold=1,Fontsize=14,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=0.7,Shadow=0`;
-        
         finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${forceStyle}'`);
-        
         console.log(`[job ${job_id}] Legenda FIXADA na posição Centro (Margem=${marginV})`);
       }
 
@@ -253,17 +248,24 @@ app.post("/render", async (req, res) => {
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
         "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart",
-        "-shortest", // Garante que o vídeo acabe assim que a locução acabar! (trava do 60s)
+        "-shortest", 
         outputPath
       );
 
       await runFfmpeg(finalArgs);
       console.log(`[job ${job_id}] ffmpeg finalizou ✅`);
 
-      console.log(`[job ${job_id}] upload Supabase...`);
-      const objectPath = `final/${job_id}.mp4`;
-      const video_url = await uploadMp4ToSupabase(outputPath, objectPath);
+      // 🟢 PASSO 2 E 3: Criar a URL temporária e remover o upload do Supabase
+      console.log(`[job ${job_id}] Gerando URL temporária para o webhook...`);
       
+      // Pegamos a URL base do Render (ex: https://meu-worker.onrender.com)
+      const serverUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+      
+      // Montamos a URL pública. Como mapeamos '/videos' para '/tmp/video-worker', 
+      // e o arquivo está em '/tmp/video-worker/JOB_ID/output.mp4', o link fica assim:
+      const video_url = `${serverUrl}/videos/${job_id}/output.mp4`;
+      
+      console.log(`[job ${job_id}] Enviando para o webhook: ${video_url}`);
       await callWebhook(webhook_url, webhook_secret, { job_id, status: "completed", video_url });
       
     } catch (e) {
