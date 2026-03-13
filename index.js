@@ -267,6 +267,17 @@ app.post("/render", async (req, res) => {
       
       console.log(`[job ${job_id}] Enviando para o webhook: ${video_url}`);
       await callWebhook(webhook_url, webhook_secret, { job_id, status: "completed", video_url });
+
+      // 🟢 NOVO: LIMPEZA APÓS SUCESSO (Aguarda 15 minutos e apaga os ficheiros pesados)
+      setTimeout(() => {
+        console.log(`[job ${job_id}] 🧹 Limpando arquivos temporários do disco...`);
+        try {
+          fs.rmSync(workDir, { recursive: true, force: true });
+          console.log(`[job ${job_id}] 🗑️ Pasta apagada com sucesso! Espaço libertado.`);
+        } catch (cleanupErr) {
+          console.log(`[job ${job_id}] ⚠️ Erro ao limpar pasta:`, cleanupErr.message);
+        }
+      }, 15 * 60 * 1000); // 15 minutos em milissegundos
       
     } catch (e) {
       console.log(`[job ${job_id}] FALHOU:`, e?.message || e);
@@ -274,6 +285,16 @@ app.post("/render", async (req, res) => {
         await callWebhook(webhook_url, webhook_secret, { job_id, status: "failed", error: e?.message || String(e) });
       } catch (err2) {
         console.log("[webhook] ERRO ao enviar failed");
+      }
+
+      // 🟢 NOVO: LIMPEZA IMEDIATA EM CASO DE ERRO (Não precisamos esperar 15 minutos se deu erro)
+      try {
+        if (fs.existsSync(workDir)) {
+          fs.rmSync(workDir, { recursive: true, force: true });
+          console.log(`[job ${job_id}] 🗑️ Lixo de erro apagado.`);
+        }
+      } catch (cleanupErr) {
+         // Ignorar erro silenciosamente para não travar o servidor
       }
     }
   })();
