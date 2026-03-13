@@ -174,7 +174,7 @@ app.post("/render", async (req, res) => {
 
           const normPath = path.join(workDir, `slice_${i}.mp4`);
           const startTime = clip.start || clip.startTime || clip.ss || 0;
-          const duration = clip.duration || (clip.end ? clip.end - startTime : 3); 
+          const duration = 5; 
           
           console.log(`[job ${job_id}] Cortando slice ${i}: início ${startTime}s, duração ${duration}s`);
           
@@ -197,7 +197,7 @@ app.post("/render", async (req, res) => {
            const normPath = path.join(workDir, `slice_${i}.mp4`);
            await runFfmpeg([
             "-y", "-hide_banner", "-loglevel", "error",
-            "-t", "15", 
+            "-t", "5", 
             "-i", downloadedClipsMap[url],
             "-vf", vf,
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
@@ -280,3 +280,4 @@ app.post("/render", async (req, res) => {
 });
 
 app.listen(PORT, () => console.log("Worker rodando na porta", PORT));
+
