@@ -9,6 +9,7 @@ app.use(express.json({ limit: "50mb" }));
 
 // 🟢 PASSO 1: Expor a pasta temporária publicamente
 // Isso permite que a URL do vídeo gerado possa ser acessada pelo seu Webhook para download
+// (Isto resolve o problema do "Cannot GET" se o ficheiro existir fisicamente)
 app.use("/videos", express.static("/tmp/video-worker"));
 
 // ---------- CONFIG (Render Env Vars) ----------
@@ -27,10 +28,12 @@ const DEFAULT_FPS = parseInt(process.env.DEFAULT_FPS || "30", 10);
 app.get("/", (req, res) => res.send("OK"));
 app.get("/health", (req, res) => res.json({ ok: true }));
 
+// Função para garantir que a pasta existe antes de guardar ficheiros
 function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
 }
 
+// Função para fazer o download de ficheiros da internet para o servidor
 async function downloadToFile(url, filePath) {
   const r = await axios({
     url,
@@ -73,6 +76,7 @@ async function uploadMp4ToSupabase(localFilePath, objectPath) {
   return `${SUPABASE_URL}/storage/v1/object/public/${FINAL_BUCKET}/${objectPath}`;
 }
 
+// Função para enviar os dados de volta para o seu Webhook (ex: Make, n8n)
 async function callWebhook(webhook_url, webhook_secret, payload) {
   await axios.post(webhook_url, payload, {
     headers: {
@@ -83,6 +87,7 @@ async function callWebhook(webhook_url, webhook_secret, payload) {
   });
 }
 
+// Função para executar comandos do FFMPEG de forma assíncrona
 function runFfmpeg(args) {
   return new Promise((resolve, reject) => {
     console.log("[ffmpeg] cmd:", `ffmpeg ${args.join(" ")}`);
@@ -99,6 +104,7 @@ function runFfmpeg(args) {
   });
 }
 
+// Rota principal que recebe o pedido de renderização
 app.post("/render", async (req, res) => {
   const body = req.body || {};
 
@@ -266,7 +272,15 @@ app.post("/render", async (req, res) => {
       const video_url = `${serverUrl}/videos/${job_id}/output.mp4`;
       
       console.log(`[job ${job_id}] Enviando para o webhook: ${video_url}`);
-      await callWebhook(webhook_url, webhook_secret, { job_id, status: "completed", video_url });
+      
+      // 💡 ADICIONADO: Isolamos o Webhook num try...catch próprio
+      // Assim, se o serviço do webhook falhar e der erro 500, o vídeo NÃO será apagado acidentalmente.
+      try {
+        await callWebhook(webhook_url, webhook_secret, { job_id, status: "completed", video_url });
+        console.log(`[job ${job_id}] Webhook notificado com sucesso.`);
+      } catch (webhookErro) {
+        console.log(`[job ${job_id}] ⚠️ AVISO: O vídeo foi gerado, mas o Webhook retornou um erro: ${webhookErro.message}`);
+      }
 
       // 🟢 NOVO: LIMPEZA APÓS SUCESSO (Aguarda 15 minutos e apaga os ficheiros pesados)
       setTimeout(() => {
@@ -280,14 +294,14 @@ app.post("/render", async (req, res) => {
       }, 15 * 60 * 1000); // 15 minutos em milissegundos
       
     } catch (e) {
-      console.log(`[job ${job_id}] FALHOU:`, e?.message || e);
+      console.log(`[job ${job_id}] FALHOU O PROCESSAMENTO:`, e?.message || e);
       try {
         await callWebhook(webhook_url, webhook_secret, { job_id, status: "failed", error: e?.message || String(e) });
       } catch (err2) {
-        console.log("[webhook] ERRO ao enviar failed");
+        console.log("[webhook] ERRO ao enviar status failed");
       }
 
-      // 🟢 NOVO: LIMPEZA IMEDIATA EM CASO DE ERRO (Não precisamos esperar 15 minutos se deu erro)
+      // 🟢 NOVO: LIMPEZA IMEDIATA EM CASO DE ERRO FATAL (Erro no processamento do FFMPEG ou downloads)
       try {
         if (fs.existsSync(workDir)) {
           fs.rmSync(workDir, { recursive: true, force: true });
@@ -301,4 +315,3 @@ app.post("/render", async (req, res) => {
 });
 
 app.listen(PORT, () => console.log("Worker rodando na porta", PORT));
-
