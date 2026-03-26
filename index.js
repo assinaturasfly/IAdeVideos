@@ -236,9 +236,10 @@ app.post("/render", async (req, res) => {
         "-i", audioPath 
       ];
 
+      // 🟢 CONFIGURAÇÃO DA LEGENDA "VIRAL" AQUI 🟢
       if (activeSubtitlePath) {
-        let marginV = 50; 
-        const forceStyle = `Alignment=2,MarginV=${marginV},Fontname=Montserrat,Bold=1,Fontsize=14,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=0.7,Shadow=0`;
+        let marginV = 150; 
+        const forceStyle = `Alignment=2,MarginV=${marginV},Fontname=Montserrat,Bold=1,Fontsize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0`;
         finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${forceStyle}'`);
         console.log(`[job ${job_id}] Legenda FIXADA na posição Centro (Margem=${marginV})`);
       }
