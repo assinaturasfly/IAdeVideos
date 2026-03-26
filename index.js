@@ -312,6 +312,3 @@ app.post("/render", async (req, res) => {
 });
 
 app.listen(PORT, () => console.log("Worker rodando na porta", PORT));
-
-
-me envie o codigo inteiro
