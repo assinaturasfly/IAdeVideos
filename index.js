@@ -110,11 +110,10 @@ async function processarFila() {
             .eq('id', job_id);
 
         // C. Extrai os dados do banco (VERIFIQUE OS NOMES DAS COLUNAS AQUI!)
-        const audio_url = job.audio_url; 
+        const audio_url = job.narration_audio_url; 
         const subtitle_url = job.subtitle_url; 
         const subtitle_text = job.subtitle_text;
-        const timeline = job.timeline_data || []; 
-        const broll_urls = job.broll_urls || [];
+        const timeline = job.b_roll_video_urls || [];
 
         const width = DEFAULT_WIDTH;
         const height = DEFAULT_HEIGHT;
