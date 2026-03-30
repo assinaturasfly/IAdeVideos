@@ -7,6 +7,7 @@ const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 app.use(express.json({ limit: "50mb" }));
+// Caminho para servir os vídeos gerados
 app.use("/videos", express.static("/tmp/video-worker"));
 
 // ---------- CONFIG (Render Env Vars) --------
@@ -21,18 +22,19 @@ const DEFAULT_WIDTH = parseInt(process.env.DEFAULT_WIDTH || "720", 10);
 const DEFAULT_HEIGHT = parseInt(process.env.DEFAULT_HEIGHT || "1280", 10);
 const DEFAULT_FPS = parseInt(process.env.DEFAULT_FPS || "30", 10);
 
-// Inicia o cliente do Supabase
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-// --------------------------------------------
 
 app.get("/", (req, res) => res.send("Worker com Fila rodando OK"));
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 function ensureDir(p) {
-  fs.mkdirSync(p, { recursive: true });
+  if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
 }
 
 async function downloadToFile(url, filePath) {
+  if (!url || !url.startsWith('http')) {
+    throw new Error(`URL Inválida para download: ${url}`);
+  }
   const r = await axios({
     url,
     responseType: "stream",
@@ -53,9 +55,6 @@ function runFfmpeg(args) {
     console.log("[ffmpeg] cmd:", `ffmpeg ${args.join(" ")}`);
     const p = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
 
-    p.stdout.on("data", (d) => console.log("[ffmpeg][out]", d.toString().trim()));
-    p.stderr.on("data", (d) => console.log("[ffmpeg][err]", d.toString().trim()));
-
     p.on("error", reject);
     p.on("close", (code) => {
       if (code === 0) return resolve();
@@ -64,26 +63,28 @@ function runFfmpeg(args) {
   });
 }
 
-// Função para avisar a Vercel sobre o status
 async function callWebhook(webhook_url, webhook_secret, payload) {
     if (!webhook_url) return; 
-    await axios.post(webhook_url, payload, {
-      headers: {
-        "Content-Type": "application/json",
-        "x-webhook-secret": webhook_secret || "",
-      },
-      timeout: 30000,
-    });
-  }
+    try {
+        await axios.post(webhook_url, payload, {
+          headers: {
+            "Content-Type": "application/json",
+            "x-webhook-secret": webhook_secret || "",
+          },
+          timeout: 30000,
+        });
+    } catch (e) {
+        console.log("[Webhook] Erro ao disparar:", e.message);
+    }
+}
 
 // ----------------------------------------------------------------------
 // FUNÇÃO PRINCIPAL DA FILA
 // ----------------------------------------------------------------------
 async function processarFila() {
-    let job_id; // Declarado no escopo principal para ser acessível no catch
+    let job_id;
 
     try {
-        // A. Procura o vídeo mais antigo que está 'na_fila'
         const { data: job, error: buscaError } = await supabase
             .from('videos')
             .select('*')
@@ -92,32 +93,24 @@ async function processarFila() {
             .limit(1)
             .single(); 
 
-        // Se a fila estiver vazia, aguarda 5 segundos e tenta de novo
         if (buscaError || !job) {
             setTimeout(processarFila, 5000); 
             return;
         }
 
         job_id = job.id; 
-        console.log(`\n==================================================`);
-        console.log(`[FILA] Encontrou vídeo para processar: ${job_id}`);
-        console.log(`==================================================`);
+        console.log(`\n[FILA] Processando: ${job_id}`);
 
-        // B. Trava o vídeo no banco 
         await supabase
             .from('videos')
             .update({ status: 'processando' })
             .eq('id', job_id);
 
-        // C. Extrai os dados do banco (VERIFIQUE OS NOMES DAS COLUNAS AQUI!)
+        // NOMES DAS COLUNAS AJUSTADOS PARA O SEU BANCO
         const audio_url = job.narration_audio_url; 
         const subtitle_url = job.subtitle_url; 
         const subtitle_text = job.subtitle_text;
         const timeline = job.b_roll_video_urls || [];
-
-        const width = DEFAULT_WIDTH;
-        const height = DEFAULT_HEIGHT;
-        const fps = DEFAULT_FPS;
 
         const workDir = path.join("/tmp", "video-worker", job_id);
         ensureDir(workDir);
@@ -129,83 +122,60 @@ async function processarFila() {
         let activeSubtitlePath = null;
         const downloadedClipsMap = {};
 
-        // ----------------------------------------------------------------
-        // GERAÇÃO DO VÍDEO COM FFMPEG
-        // ----------------------------------------------------------------
-        console.log(`[job ${job_id}] baixando áudio...`);
-        if(audio_url) await downloadToFile(audio_url, audioPath); 
-
-        const urlsToDownload = new Set();
-        if (timeline && timeline.length > 0) {
-            timeline.forEach(clip => urlsToDownload.add(clip.url || clip.src));
-        } else {
-            broll_urls.forEach(url => urlsToDownload.add(url));
+        // 1. Download do Áudio
+        if(audio_url) {
+            console.log(`[job ${job_id}] baixando áudio...`);
+            await downloadToFile(audio_url, audioPath);
         }
 
-        console.log(`[job ${job_id}] Baixando ${urlsToDownload.size} vídeos originais...`);
-        
-        let index = 0;
+        // 2. Download dos Vídeos (Timeline)
+        const urlsToDownload = new Set();
+        timeline.forEach(url => {
+            if (url) urlsToDownload.add(url);
+        });
+
+        if (urlsToDownload.size === 0) {
+            throw new Error("Nenhum vídeo (B-roll) foi selecionado para montagem.");
+        }
+
+        console.log(`[job ${job_id}] Baixando ${urlsToDownload.size} clipes...`);
+        let idx = 0;
         for (const url of urlsToDownload) {
-            const cPath = path.join(workDir, `raw_${index}.mp4`);
+            const cPath = path.join(workDir, `raw_${idx}.mp4`);
             await downloadToFile(url, cPath);
             downloadedClipsMap[url] = cPath;
-            index++;
+            idx++;
         }
 
+        // 3. Normalização dos clipes
         const normalizedClips = [];
-        const vf = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},format=yuv420p`;
+        const vf = `fps=${DEFAULT_FPS},scale=${DEFAULT_WIDTH}:${DEFAULT_HEIGHT}:force_original_aspect_ratio=increase,crop=${DEFAULT_WIDTH}:${DEFAULT_HEIGHT},format=yuv420p`;
 
-        if (timeline && timeline.length > 0) {
-            console.log(`[job ${job_id}] Recortando clipes com base na timeline...`);
-            for (let i = 0; i < timeline.length; i++) {
-                const clip = timeline[i];
-                const rawPath = downloadedClipsMap[clip.url || clip.src];
-                if (!rawPath) continue;
+        for (let i = 0; i < timeline.length; i++) {
+            const url = timeline[i];
+            const rawPath = downloadedClipsMap[url];
+            if (!rawPath) continue;
 
-                const normPath = path.join(workDir, `slice_${i}.mp4`);
-                const startTime = clip.start || clip.startTime || clip.ss || 0;
-                const duration = 5; 
-                
-                await runFfmpeg([
-                    "-y", "-hide_banner", "-loglevel", "error",
-                    "-ss", String(startTime),
-                    "-t", String(duration),  
-                    "-i", rawPath,
-                    "-vf", vf,
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-                    "-an", 
-                    normPath
-                ]);
-                normalizedClips.push(normPath);
-            }
-        } else {
-            console.log(`[job ${job_id}] Processando clipes crus...`);
-            let i = 0;
-            for (const url in downloadedClipsMap) {
-               const normPath = path.join(workDir, `slice_${i}.mp4`);
-               await runFfmpeg([
-                "-y", "-hide_banner", "-loglevel", "error",
-                "-t", "5", 
-                "-i", downloadedClipsMap[url],
+            const normPath = path.join(workDir, `slice_${i}.mp4`);
+            console.log(`[job ${job_id}] Processando clipe ${i}...`);
+
+            await runFfmpeg([
+                "-y", "-ss", "0", "-t", "5", 
+                "-i", rawPath,
                 "-vf", vf,
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-                "-an", 
+                "-c:v", "libx264", "-preset", "ultrafast", "-an", 
                 normPath
-              ]);
-              normalizedClips.push(normPath);
-              i++;
-            }
+            ]);
+            normalizedClips.push(normPath);
         }
 
+        // 4. Concatenação
         const playlistPath = path.join(workDir, "playlist.txt");
-        let playlistContent = "";
-        for (const clip of normalizedClips) {
-            playlistContent += `file '${clip}'\n`;
-        }
+        const playlistContent = normalizedClips.map(p => `file '${p}'`).join('\n');
         fs.writeFileSync(playlistPath, playlistContent);
 
+        // 5. Legendas
         if (subtitle_url) {
-            console.log(`[job ${job_id}] baixando legenda...`);
             await downloadToFile(subtitle_url, srtPath);
             activeSubtitlePath = srtPath;
         } else if (subtitle_text) {
@@ -213,110 +183,45 @@ async function processarFila() {
             activeSubtitlePath = srtPath;
         }
 
-        console.log(`[job ${job_id}] montagem final...`);
-        const finalArgs = [
-            "-y", "-hide_banner", "-loglevel", "info",
-            "-f", "concat", "-safe", "0", "-i", playlistPath, 
-        ];
+        // 6. Montagem Final
+        console.log(`[job ${job_id}] Gerando vídeo final...`);
+        const finalArgs = ["-y", "-f", "concat", "-safe", "0", "-i", playlistPath];
         
-        if(fs.existsSync(audioPath)){
-           finalArgs.push("-i", audioPath);
-        }
+        if(fs.existsSync(audioPath)) finalArgs.push("-i", audioPath);
 
         if (activeSubtitlePath) {
-            let marginV = 90; 
-            const forceStyle = `Alignment=2,MarginV=${marginV},Fontname=Montserrat,Bold=1,Fontsize=8,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=0.4.,Shadow=0`;
-            finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${forceStyle}'`);
+            const style = `Alignment=2,MarginV=90,Fontname=Montserrat,Bold=1,Fontsize=18`;
+            finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${style}'`);
         }
 
-        finalArgs.push(
-            "-map", "0:v:0"
-        );
+        finalArgs.push("-c:v", "libx264", "-preset", "ultrafast", "-crf", "28");
+        if(fs.existsSync(audioPath)) finalArgs.push("-c:a", "aac", "-shortest");
         
-        if(fs.existsSync(audioPath)){
-             finalArgs.push("-map", "1:a:0");
-        }
-
-        finalArgs.push(
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
-            "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+faststart",
-            "-shortest", 
-            outputPath
-        );
-
+        finalArgs.push(outputPath);
         await runFfmpeg(finalArgs);
-        console.log(`[job ${job_id}] ffmpeg finalizou ✅`);
 
-        // ----------------------------------------------------------------
-        // FINALIZAÇÃO: Atualiza banco, avisa Webhook e limpa pasta
-        // ----------------------------------------------------------------
-        
-        const serverUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+        // 7. Finalização
+        const serverUrl = process.env.RENDER_EXTERNAL_URL || `https://${process.env.RENDER_SERVICE_NAME}.onrender.com`;
         const video_url = `${serverUrl}/videos/${job_id}/output.mp4`;
 
-        // 1. Atualiza o banco
-        await supabase
-            .from('videos')
-            .update({ 
-                status: 'concluido',
-                drive_link: video_url 
-            })
-            .eq('id', job_id);
+        await supabase.from('videos').update({ 
+            status: 'concluido', 
+            drive_link: video_url 
+        }).eq('id', job_id);
 
-        console.log(`[job ${job_id}] ✅ Banco de dados atualizado com sucesso!`);
+        await callWebhook(WEBHOOK_URL, WEBHOOK_SECRET, { job_id, status: "completed", video_url });
 
-        // 2. Avisa a Vercel
-        try {
-            console.log(`[job ${job_id}] Enviando aviso para o Webhook da Vercel...`);
-            await callWebhook(WEBHOOK_URL, WEBHOOK_SECRET, { 
-                job_id: job_id, 
-                status: "completed", 
-                video_url: video_url 
-            });
-            console.log(`[job ${job_id}] ✅ Webhook recebido pela Vercel!`);
-        } catch (webhookError) {
-            console.log(`[job ${job_id}] ⚠️ O vídeo foi gerado, mas a Vercel falhou ao receber o Webhook:`, webhookError?.message);
-        }
-
-        // 3. Limpeza
-        setTimeout(() => {
-            try {
-                fs.rmSync(workDir, { recursive: true, force: true });
-                console.log(`[job ${job_id}] 🗑️ Pasta apagada com sucesso!`);
-            } catch (cleanupErr) {
-                console.log(`[job ${job_id}] ⚠️ Erro ao limpar pasta:`, cleanupErr.message);
-            }
-        }, 15 * 60 * 1000); 
-
-        // 4. Chama o próximo da fila
-        processarFila();
+        processarFila(); // Próximo!
 
     } catch (e) {
-        console.error(`[FILA ERRO CRÍTICO]`, e?.message || e);
-        
-        // Se houver job_id, avisa o erro no banco e para o webhook
+        console.error(`[ERRO]`, e.message);
         if (job_id) {
-            try {
-                await supabase.from('videos').update({ status: 'erro' }).eq('id', job_id);
-                
-                await callWebhook(WEBHOOK_URL, WEBHOOK_SECRET, { 
-                    job_id: job_id, 
-                    status: "failed", 
-                    error: e?.message || String(e) 
-                });
-            } catch (err2) {
-                console.log("[webhook] ERRO ao atualizar falha:", err2.message);
-            }
+            await supabase.from('videos').update({ status: 'failed' }).eq('id', job_id);
+            await callWebhook(WEBHOOK_URL, WEBHOOK_SECRET, { job_id, status: "failed", error: e.message });
         }
-        
-        // Pausa 10s e tenta de novo
-        setTimeout(processarFila, 10000); 
+        setTimeout(processarFila, 10000);
     }
 }
 
-// Inicia o motor da fila
-console.log("Iniciando Worker de Vídeos com Fila Supabase...");
 processarFila();
-
-app.listen(PORT, () => console.log("Worker (Web Server) rodando na porta", PORT));
+app.listen(PORT, () => console.log("Servidor rodando na porta", PORT));
