@@ -17,7 +17,7 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
-const DEFAULT_WIDTH = parseInt(process.env.DEFAULT_WIDTH || "1080", 10); // Ajustado para Full HD Vertical
+const DEFAULT_WIDTH = parseInt(process.env.DEFAULT_WIDTH || "1080", 10);
 const DEFAULT_HEIGHT = parseInt(process.env.DEFAULT_HEIGHT || "1920", 10);
 const DEFAULT_FPS = parseInt(process.env.DEFAULT_FPS || "30", 10);
 
@@ -58,7 +58,7 @@ async function callWebhook(webhook_url, webhook_secret, payload) {
 }
 
 // ----------------------------------------------------------------------
-// MOTOR DA FILA
+// MOTOR DA FILA COM ATUALIZAÇÃO DE ETAPAS (CICLOS)
 // ----------------------------------------------------------------------
 async function processarFila() {
     let job_id = null;
@@ -80,11 +80,12 @@ async function processarFila() {
         job_id = job.id; 
         console.log(`\n--- [FILA] Iniciando: ${job_id} ---`);
 
-        await supabase.from('videos').update({ status: 'editing_video' }).eq('id', job_id);
+        // 🟢 ETAPA 1: Gerando Narração (Início do download do áudio)
+        await supabase.from('videos').update({ status: 'generating_audio' }).eq('id', job_id);
 
         const audio_url = job.narration_audio_url; 
         const timeline = job.b_roll_video_urls || [];
-        const subtitle_text = job.subtitle_text; // Pegando o texto da legenda do banco
+        const subtitle_text = job.subtitle_text;
         
         const workDir = path.join("/tmp", "video-worker", job_id);
         ensureDir(workDir);
@@ -93,21 +94,14 @@ async function processarFila() {
         const outputPath = path.join(workDir, "output.mp4");
         const srtPath = path.join(workDir, "subs.srt");
 
-        // 1. Download Áudio
         if (audio_url) {
             console.log("Baixando áudio...");
             await downloadToFile(audio_url, audioPath);
         }
 
-        // 2. Legendas (Ajuste para garantir que o arquivo SRT seja criado)
-        let hasSubtitles = false;
-        if (subtitle_text) {
-            fs.writeFileSync(srtPath, subtitle_text);
-            hasSubtitles = true;
-            console.log("Legenda salva no disco.");
-        }
+        // 🟢 ETAPA 2: Buscando/Processando B-roll
+        await supabase.from('videos').update({ status: 'searching_broll' }).eq('id', job_id);
 
-        // 3. Download e Normalização dos clipes
         console.log(`Processando ${timeline.length} clipes...`);
         const clips = [];
         const vfBase = `fps=${DEFAULT_FPS},scale=${DEFAULT_WIDTH}:${DEFAULT_HEIGHT}:force_original_aspect_ratio=increase,crop=${DEFAULT_WIDTH}:${DEFAULT_HEIGHT},format=yuv420p`;
@@ -125,11 +119,21 @@ async function processarFila() {
             clips.push(nPath);
         }
 
-        // 4. Concatenação
+        // 🟢 ETAPA 3: Gerando Legendas
+        await supabase.from('videos').update({ status: 'generating_subtitles' }).eq('id', job_id);
+        let hasSubtitles = false;
+        if (subtitle_text) {
+            fs.writeFileSync(srtPath, subtitle_text);
+            hasSubtitles = true;
+            console.log("Legenda salva no disco.");
+        }
+
+        // 🟢 ETAPA 4: Montando Vídeo (Render Final)
+        await supabase.from('videos').update({ status: 'rendering_video' }).eq('id', job_id);
+
         const playlistPath = path.join(workDir, "playlist.txt");
         fs.writeFileSync(playlistPath, clips.map(p => `file '${p}'`).join('\n'));
 
-        // 5. Montagem Final (CORREÇÃO DO TRAVAMENTO E LEGENDA)
         console.log("Renderizando final...");
         const finalArgs = ["-y", "-f", "concat", "-safe", "0", "-i", playlistPath];
         
@@ -137,16 +141,9 @@ async function processarFila() {
             finalArgs.push("-i", audioPath);
         }
 
-        // Filtro de Legenda (Corrigido para usar o arquivo SRT)
-        let filterComplex = "";
         if (hasSubtitles) {
-            // O estilo Alignment=2 coloca no centro embaixo. Fontsize 18-24 é melhor para mobile.
             const style = `Alignment=2,MarginV=120,Fontname=Montserrat,Bold=1,Fontsize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1`;
-            filterComplex = `subtitles=${srtPath}:force_style='${style}'`;
-        }
-
-        if (filterComplex) {
-            finalArgs.push("-vf", filterComplex);
+            finalArgs.push("-vf", `subtitles=${srtPath}:force_style='${style}'`);
         }
 
         finalArgs.push(
@@ -155,7 +152,7 @@ async function processarFila() {
             "-crf", "28", 
             "-c:a", "aac", 
             "-b:a", "128k",
-            "-shortest", // 🟢 EVITA TRAVAMENTO NO FINAL: Corta o vídeo quando o áudio acaba
+            "-shortest", 
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
             outputPath
@@ -163,7 +160,7 @@ async function processarFila() {
         
         await runFfmpeg(finalArgs);
 
-        // 6. Finalização
+        // 🟢 ETAPA 5: Finalização / Em Revisão
         const serverUrl = process.env.RENDER_EXTERNAL_URL || `https://${process.env.RENDER_SERVICE_NAME}.onrender.com`;
         const video_url = `${serverUrl}/videos/${job_id}/output.mp4`;
 
@@ -175,7 +172,9 @@ async function processarFila() {
         await callWebhook(WEBHOOK_URL, WEBHOOK_SECRET, { job_id, status: "completed", video_url });
 
         console.log("✅ Vídeo pronto e Webhook enviado!");
-        processarFila();
+        
+        // Pequeno delay para garantir que o banco atualizou antes de buscar o próximo
+        setTimeout(processarFila, 1000);
 
     } catch (e) {
         console.error(`❌ ERRO NO JOB ${job_id}:`, e.message);
