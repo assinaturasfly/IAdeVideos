@@ -5,174 +5,617 @@ const path = require("path");
 const { spawn } = require("child_process");
 
 const app = express();
+
 app.use(express.json({ limit: "50mb" }));
 
-// Expor pasta temporária
+
+
+// 🟢 PASSO 1: Expor a pasta temporária publicamente
+
+// Isso permite que a URL do vídeo gerado possa ser acessada pelo seu Webhook para download
+
 app.use("/videos", express.static("/tmp/video-worker"));
 
-// ---------- CONFIG ----------
+
+
+// ---------- CONFIG (Render Env Vars) ----------
+
 const PORT = process.env.PORT || 3000;
+
 const SUPABASE_URL = process.env.SUPABASE_URL;
+
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
 const FINAL_BUCKET = process.env.FINAL_BUCKET || "final-videos";
 
+
+
 const DEFAULT_WIDTH = parseInt(process.env.DEFAULT_WIDTH || "720", 10);
+
 const DEFAULT_HEIGHT = parseInt(process.env.DEFAULT_HEIGHT || "1280", 10);
+
 const DEFAULT_FPS = parseInt(process.env.DEFAULT_FPS || "30", 10);
 
-// ---------- SISTEMA DE FILA ----------
-const videoQueue = [];
-let isProcessing = false;
+// --------------------------------------------
 
-// Funções Auxiliares
-function ensureDir(p) { fs.mkdirSync(p, { recursive: true }); }
+
+
+app.get("/", (req, res) => res.send("OK"));
+
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+
+
+function ensureDir(p) {
+
+  fs.mkdirSync(p, { recursive: true });
+
+}
+
+
+
+// Função para descarregar ficheiros (áudio, vídeos crus, etc.)
 
 async function downloadToFile(url, filePath) {
-  const r = await axios({ url, responseType: "stream", timeout: 120000 });
-  await new Promise((resolve, reject) => {
-    const w = fs.createWriteStream(filePath);
-    r.data.pipe(w);
-    w.on("finish", resolve);
-    w.on("error", reject);
+
+  const r = await axios({
+
+    url,
+
+    responseType: "stream",
+
+    timeout: 120000,
+
+    headers: { "User-Agent": "video-worker/1.0" },
+
   });
+
+
+
+  await new Promise((resolve, reject) => {
+
+    const w = fs.createWriteStream(filePath);
+
+    r.data.pipe(w);
+
+    w.on("finish", resolve);
+
+    w.on("error", reject);
+
+  });
+
 }
+
+
+
+// Função mantida para o caso de precisares no futuro
 
 async function uploadMp4ToSupabase(localFilePath, objectPath) {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Credenciais Supabase ausentes");
+
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+
+    throw new Error("SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY não configurados");
+
+  }
+
+
+
   const uploadUrl = `${SUPABASE_URL}/storage/v1/object/${FINAL_BUCKET}/${objectPath}`;
+
   const stat = fs.statSync(localFilePath);
-  await axios.put(uploadUrl, fs.createReadStream(localFilePath), {
+
+  const stream = fs.createReadStream(localFilePath);
+
+
+
+  await axios.put(uploadUrl, stream, {
+
     headers: {
+
       Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+
       "Content-Type": "video/mp4",
+
       "Content-Length": stat.size,
+
       "x-upsert": "true",
+
     },
-    maxBodyLength: Infinity, timeout: 300000,
+
+    maxBodyLength: Infinity,
+
+    maxContentLength: Infinity,
+
+    timeout: 300000,
+
   });
+
+
+
   return `${SUPABASE_URL}/storage/v1/object/public/${FINAL_BUCKET}/${objectPath}`;
+
 }
 
-async function callWebhook(url, secret, payload) {
-  try {
-    await axios.post(url, payload, { headers: { "x-webhook-secret": secret }, timeout: 30000 });
-  } catch (e) { console.log("Erro no Webhook:", e.message); }
+
+
+// Função que avisa a aplicação externa (Lovable) sobre o estado do job
+
+async function callWebhook(webhook_url, webhook_secret, payload) {
+
+  await axios.post(webhook_url, payload, {
+
+    headers: {
+
+      "Content-Type": "application/json",
+
+      "x-webhook-secret": webhook_secret,
+
+    },
+
+    timeout: 30000,
+
+  });
+
 }
+
+
+
+// Wrapper para executar os comandos do FFmpeg
 
 function runFfmpeg(args) {
+
   return new Promise((resolve, reject) => {
-    const p = spawn("ffmpeg", args);
-    p.on("close", (code) => code === 0 ? resolve() : reject(new Error(`FFmpeg erro ${code}`)));
+
+    console.log("[ffmpeg] cmd:", `ffmpeg ${args.join(" ")}`);
+
+    const p = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
+
+
+
+    p.stdout.on("data", (d) => console.log("[ffmpeg][out]", d.toString().trim()));
+
+    p.stderr.on("data", (d) => console.log("[ffmpeg][err]", d.toString().trim()));
+
+
+
+    p.on("error", reject);
+
+    p.on("close", (code) => {
+
+      if (code === 0) return resolve();
+
+      reject(new Error(`ffmpeg saiu com code ${code}`));
+
+    });
+
   });
+
 }
 
-// ---------- PROCESSADOR DA FILA ----------
-async function processQueue() {
-  if (isProcessing || videoQueue.length === 0) return;
+
+
+app.post("/render", async (req, res) => {
+
+  const body = req.body || {};
+
+
+
+  const job_id = body.job_id;
+
+  const webhook_url = body.webhook_url;
+
+  const webhook_secret = body.webhook_secret;
+
+  const audio_url = body.audio_url;
+
+  const output_config = body.output_config || {};
+
   
-  isProcessing = true;
-  const job = videoQueue.shift(); // Pega o primeiro da fila
-  const { job_id, webhook_url, webhook_secret, audio_url, timeline, broll_urls, output_config, subtitle_url, subtitle_text } = job;
+
+  const timeline = body.timeline || body.broll_timeline || output_config.timeline || [];
+
+  const broll_urls = body.broll_urls || [];
+
   
-  const workDir = path.join("/tmp", "video-worker", job_id);
-  ensureDir(workDir);
 
-  try {
-    console.log(`[Job ${job_id}] Iniciando processamento...`);
-    
-    // 1. Downloads
-    const audioPath = path.join(workDir, "audio.mp3");
-    await downloadToFile(audio_url, audioPath);
+  const subtitle_url = body.subtitle_url || output_config.subtitle_url;
 
-    const urlsToDownload = timeline.length > 0 ? timeline.map(c => c.url || c.src) : broll_urls;
-    const downloadedClipsMap = {};
-    for (let i = 0; i < urlsToDownload.length; i++) {
-      const p = path.join(workDir, `raw_${i}.mp4`);
-      await downloadToFile(urlsToDownload[i], p);
-      downloadedClipsMap[urlsToDownload[i]] = p;
-    }
+  const subtitle_text = body.subtitle_text || output_config.subtitle_text;
 
-    // 2. Normalização de Clipes
-    const width = output_config.width || DEFAULT_WIDTH;
-    const height = output_config.height || DEFAULT_HEIGHT;
-    const fps = output_config.fps || DEFAULT_FPS;
-    const vf = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},format=yuv420p`;
-    
-    const normalizedClips = [];
-    for (let i = 0; i < (timeline.length || broll_urls.length); i++) {
-      const normPath = path.join(workDir, `slice_${i}.mp4`);
-      const clip = timeline[i] || { url: broll_urls[i], start: 0 };
-      const rawPath = downloadedClipsMap[clip.url || clip.src];
-      
-      await runFfmpeg([
-        "-y", "-ss", String(clip.start || 0), "-t", "5", "-i", rawPath,
-        "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-an", normPath
-      ]);
-      normalizedClips.push(normPath);
-    }
 
-    // 3. Legendas
-    let activeSubtitlePath = null;
-    const srtPath = path.join(workDir, "subs.srt");
-    if (subtitle_url) {
-      await downloadToFile(subtitle_url, srtPath);
-      activeSubtitlePath = srtPath;
-    } else if (subtitle_text) {
-      fs.writeFileSync(srtPath, subtitle_text);
-      activeSubtitlePath = srtPath;
-    }
 
-    // 4. Montagem Final
-    const playlistPath = path.join(workDir, "playlist.txt");
-    fs.writeFileSync(playlistPath, normalizedClips.map(p => `file '${p}'`).join("\n"));
-    
-    const outputPath = path.join(workDir, "output.mp4");
-    const finalArgs = ["-y", "-f", "concat", "-safe", "0", "-i", playlistPath, "-i", audioPath];
-    
-    if (activeSubtitlePath) {
-      const style = `Alignment=2,MarginV=90,Fontname=Montserrat,Bold=1,Fontsize=8,PrimaryColour=&H00FFFFFF,BorderStyle=1,Outline=0.4`;
-      finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${style}'`);
-    }
+  const width = Number(output_config.width || DEFAULT_WIDTH);
 
-    finalArgs.push("-c:v", "libx264", "-preset", "ultrafast", "-crf", "30", "-c:a", "aac", "-shortest", outputPath);
-    await runFfmpeg(finalArgs);
+  const height = Number(output_config.height || DEFAULT_HEIGHT);
 
-    // 5. Upload para Supabase (O seu desejo)
-    console.log(`[Job ${job_id}] Fazendo upload para Supabase...`);
-    const finalUrl = await uploadMp4ToSupabase(outputPath, `${job_id}/final_video.mp4`);
+  const fps = Number(output_config.fps || DEFAULT_FPS);
 
-    // 6. Webhook de Sucesso
-    await callWebhook(webhook_url, webhook_secret, { job_id, status: "completed", video_url: finalUrl });
 
-  } catch (error) {
-    console.error(`[Job ${job_id}] Erro:`, error.message);
-    await callWebhook(webhook_url, webhook_secret, { job_id, status: "failed", error: error.message });
-  } finally {
-    // Limpeza e Próximo da fila
-    setTimeout(() => fs.rmSync(workDir, { recursive: true, force: true }), 5000);
-    isProcessing = false;
-    processQueue(); 
+
+  if (!job_id || !webhook_url || !webhook_secret || !audio_url || broll_urls.length === 0) {
+
+    return res.status(400).json({ error: "Campos obrigatórios ausentes" });
+
   }
-}
 
-// ---------- ENDPOINTS ----------
-app.post("/render", (req, res) => {
-  const jobData = {
-    job_id: req.body.job_id,
-    webhook_url: req.body.webhook_url,
-    webhook_secret: req.body.webhook_secret,
-    audio_url: req.body.audio_url,
-    timeline: req.body.timeline || [],
-    broll_urls: req.body.broll_urls || [],
-    output_config: req.body.output_config || {},
-    subtitle_url: req.body.subtitle_url,
-    subtitle_text: req.body.subtitle_text
-  };
 
-  videoQueue.push(jobData);
-  processQueue(); // Tenta processar
 
-  res.json({ status: "queued", job_id: jobData.job_id, position: videoQueue.length });
+  // Responde imediatamente com HTTP 200 para não prender a requisição original
+
+  res.json({ status: "accepted", job_id });
+
+
+
+  (async () => {
+
+    const workDir = path.join("/tmp", "video-worker", job_id);
+
+    ensureDir(workDir);
+
+
+
+    const audioPath = path.join(workDir, "audio.mp3");
+
+    const outputPath = path.join(workDir, "output.mp4");
+
+    const srtPath = path.join(workDir, "subs.srt");
+
+    
+
+    let activeSubtitlePath = null;
+
+    const downloadedClipsMap = {};
+
+
+
+    try {
+
+      console.log(`[job ${job_id}] --------------------------------------------------`);
+
+      console.log(`[job ${job_id}] INICIANDO: Processando timeline com ${timeline.length} cortes.`);
+
+      console.log(`[job ${job_id}] --------------------------------------------------`);
+
+
+
+      console.log(`[job ${job_id}] baixando áudio...`);
+
+      await downloadToFile(audio_url, audioPath);
+
+
+
+      const urlsToDownload = new Set();
+
+      if (timeline && timeline.length > 0) {
+
+        timeline.forEach(clip => urlsToDownload.add(clip.url || clip.src));
+
+      } else {
+
+        broll_urls.forEach(url => urlsToDownload.add(url));
+
+      }
+
+
+
+      console.log(`[job ${job_id}] Baixando ${urlsToDownload.size} vídeos originais...`);
+
+      
+
+      let index = 0;
+
+      for (const url of urlsToDownload) {
+
+        const cPath = path.join(workDir, `raw_${index}.mp4`);
+
+        await downloadToFile(url, cPath);
+
+        downloadedClipsMap[url] = cPath;
+
+        index++;
+
+      }
+
+
+
+      const normalizedClips = [];
+
+      const vf = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},format=yuv420p`;
+
+
+
+      if (timeline && timeline.length > 0) {
+
+        console.log(`[job ${job_id}] Recortando clipes com base na timeline (Sem loop fixo)...`);
+
+        
+
+        for (let i = 0; i < timeline.length; i++) {
+
+          const clip = timeline[i];
+
+          const rawPath = downloadedClipsMap[clip.url || clip.src];
+
+          
+
+          if (!rawPath) continue;
+
+
+
+          const normPath = path.join(workDir, `slice_${i}.mp4`);
+
+          const startTime = clip.start || clip.startTime || clip.ss || 0;
+
+          const duration = 5; 
+
+          
+
+          console.log(`[job ${job_id}] Cortando slice ${i}: início ${startTime}s, duração ${duration}s`);
+
+          
+
+          await runFfmpeg([
+
+            "-y", "-hide_banner", "-loglevel", "error",
+
+            "-ss", String(startTime),
+
+            "-t", String(duration),  
+
+            "-i", rawPath,
+
+            "-vf", vf,
+
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+
+            "-an", 
+
+            normPath
+
+          ]);
+
+          normalizedClips.push(normPath);
+
+        }
+
+      } else {
+
+        console.log(`[job ${job_id}] AVISO: Nenhuma timeline enviada. Processando clipes crus com corte base.`);
+
+        let i = 0;
+
+        for (const url in downloadedClipsMap) {
+
+           const normPath = path.join(workDir, `slice_${i}.mp4`);
+
+           await runFfmpeg([
+
+            "-y", "-hide_banner", "-loglevel", "error",
+
+            "-t", "5", 
+
+            "-i", downloadedClipsMap[url],
+
+            "-vf", vf,
+
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+
+            "-an", 
+
+            normPath
+
+          ]);
+
+          normalizedClips.push(normPath);
+
+          i++;
+
+        }
+
+      }
+
+
+
+      const playlistPath = path.join(workDir, "playlist.txt");
+
+      let playlistContent = "";
+
+      
+
+      for (const clip of normalizedClips) {
+
+          playlistContent += `file '${clip}'\n`;
+
+      }
+
+      fs.writeFileSync(playlistPath, playlistContent);
+
+
+
+      if (subtitle_url) {
+
+        console.log(`[job ${job_id}] baixando arquivo de legenda...`);
+
+        await downloadToFile(subtitle_url, srtPath);
+
+        activeSubtitlePath = srtPath;
+
+      } else if (subtitle_text) {
+
+        console.log(`[job ${job_id}] salvando texto de legenda...`);
+
+        fs.writeFileSync(srtPath, subtitle_text);
+
+        activeSubtitlePath = srtPath;
+
+      }
+
+
+
+      console.log(`[job ${job_id}] iniciando montagem final do vídeo...`);
+
+      
+
+      const finalArgs = [
+
+        "-y", "-hide_banner", "-loglevel", "info",
+
+        "-f", "concat", "-safe", "0", "-i", playlistPath, 
+
+        "-i", audioPath 
+
+      ];
+
+
+
+      if (activeSubtitlePath) {
+
+        let marginV = 90; 
+
+        const forceStyle = `Alignment=2,MarginV=${marginV},Fontname=Montserrat,Bold=1,Fontsize=8,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=0.4.,Shadow=0`;
+
+        finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${forceStyle}'`);
+
+        console.log(`[job ${job_id}] Legenda FIXADA na posição Centro (Margem=${marginV})`);
+
+      }
+
+
+
+      finalArgs.push(
+
+        "-map", "0:v:0",
+
+        "-map", "1:a:0",
+
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
+
+        "-c:a", "aac", "-b:a", "128k",
+
+        "-movflags", "+faststart",
+
+        "-shortest", 
+
+        outputPath
+
+      );
+
+
+
+      await runFfmpeg(finalArgs);
+
+      console.log(`[job ${job_id}] ffmpeg finalizou ✅`);
+
+
+
+      // 🟢 PASSO 2 E 3: Criar a URL temporária e remover o upload do Supabase
+
+      console.log(`[job ${job_id}] Gerando URL temporária para o webhook...`);
+
+      
+
+      // Pegamos a URL base do Render (ex: https://meu-worker.onrender.com)
+
+      const serverUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+
+      
+
+      // Montamos a URL pública para o ficheiro criado
+
+      const video_url = `${serverUrl}/videos/${job_id}/output.mp4`;
+
+      
+
+      console.log(`[job ${job_id}] Enviando para o webhook: ${video_url}`);
+
+      
+
+      // 🟢 NOVA LÓGICA DE PROTEÇÃO: Envolvemos a chamada de sucesso num bloco try/catch próprio
+
+      try {
+
+        await callWebhook(webhook_url, webhook_secret, { job_id, status: "completed", video_url });
+
+        console.log(`[job ${job_id}] ✅ Webhook de sucesso enviado e recebido pela Lovable!`);
+
+      } catch (webhookError) {
+
+        // Se a Lovable der erro 500, o código cai aqui, mas NÃO apaga o vídeo!
+
+        console.log(`[job ${job_id}] ⚠️ AVISO: O vídeo foi criado com sucesso, mas a Lovable recusou o Webhook.`);
+
+        // Esta linha vai imprimir o motivo exato que a Lovable devolveu (muito útil para diagnóstico)
+
+        console.log(`[job ${job_id}] ⚠️ Detalhes do erro da Lovable:`, webhookError?.response?.data || webhookError.message);
+
+      }
+
+
+
+      // 🟢 LIMPEZA APÓS SUCESSO (Aguarda 15 minutos e apaga os ficheiros pesados)
+
+      setTimeout(() => {
+
+        console.log(`[job ${job_id}] 🧹 Limpando arquivos temporários do disco após 15 minutos...`);
+
+        try {
+
+          fs.rmSync(workDir, { recursive: true, force: true });
+
+          console.log(`[job ${job_id}] 🗑️ Pasta apagada com sucesso! Espaço libertado.`);
+
+        } catch (cleanupErr) {
+
+          console.log(`[job ${job_id}] ⚠️ Erro ao limpar pasta:`, cleanupErr.message);
+
+        }
+
+      }, 15 * 60 * 1000); 
+
+      
+
+    } catch (e) {
+
+      // ESTE BLOCO AGORA SÓ É ATIVADO SE HOUVER ERRO REAL NA GERAÇÃO DO VÍDEO (Ex: FFmpeg falhar)
+
+      console.log(`[job ${job_id}] FALHOU A GERAÇÃO:`, e?.message || e);
+
+      try {
+
+        await callWebhook(webhook_url, webhook_secret, { job_id, status: "failed", error: e?.message || String(e) });
+
+      } catch (err2) {
+
+        console.log("[webhook] ERRO ao enviar aviso de falha");
+
+      }
+
+
+
+      // LIMPEZA IMEDIATA APENAS SE A GERAÇÃO DO VÍDEO DEU ERRO
+
+      try {
+
+        if (fs.existsSync(workDir)) {
+
+          fs.rmSync(workDir, { recursive: true, force: true });
+
+          console.log(`[job ${job_id}] 🗑️ Lixo de erro apagado.`);
+
+        }
+
+      } catch (cleanupErr) {
+
+         // Ignorar erro silenciosamente para não travar o servidor
+
+      }
+
+    }
+
+  })();
+
 });
 
-app.listen(PORT, () => console.log(`Worker ativo na porta ${PORT}`));
+
+
+app.listen(PORT, () => console.log("Worker rodando na porta", PORT));
