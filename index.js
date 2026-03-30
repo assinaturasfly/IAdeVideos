@@ -3,7 +3,7 @@ const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
-const { createClient } = require('@supabase/supabase-js'); // <-- 1. Adicionado o SDK do Supabase
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 app.use(express.json({ limit: "50mb" }));
@@ -11,9 +11,11 @@ app.use("/videos", express.static("/tmp/video-worker"));
 
 // ---------- CONFIG (Render Env Vars) ----------
 const PORT = process.env.PORT || 3000;
-// 2. Precisamos dessas variáveis para conectar na tabela `videos`
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY; 
+
+const WEBHOOK_URL = process.env.WEBHOOK_URL;
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
 const DEFAULT_WIDTH = parseInt(process.env.DEFAULT_WIDTH || "720", 10);
 const DEFAULT_HEIGHT = parseInt(process.env.DEFAULT_HEIGHT || "1280", 10);
@@ -62,50 +64,58 @@ function runFfmpeg(args) {
   });
 }
 
+// Função para avisar a Vercel sobre o status
+async function callWebhook(webhook_url, webhook_secret, payload) {
+    if (!webhook_url) return; 
+    await axios.post(webhook_url, payload, {
+      headers: {
+        "Content-Type": "application/json",
+        "x-webhook-secret": webhook_secret || "",
+      },
+      timeout: 30000,
+    });
+  }
+
 // ----------------------------------------------------------------------
-// 3. A NOVA ENGRENAGEM DA FILA: Função que processa UM vídeo por vez
+// FUNÇÃO PRINCIPAL DA FILA
 // ----------------------------------------------------------------------
 async function processarFila() {
+    let job_id; // Declarado no escopo principal para ser acessível no catch
+
     try {
-        // A. Procura o vídeo mais antigo que está aguardando na fila
+        // A. Procura o vídeo mais antigo que está 'na_fila'
         const { data: job, error: buscaError } = await supabase
             .from('videos')
             .select('*')
             .eq('status', 'na_fila')
-            .order('created_at', { ascending: true }) // Pega o mais antigo primeiro
+            .order('created_at', { ascending: true })
             .limit(1)
-            .single(); // Garante que retorne só um objeto, não um array
+            .single(); 
 
-        // Se não achou nenhum vídeo (a fila está vazia), aguarda 5 segundos e tenta de novo
+        // Se a fila estiver vazia, aguarda 5 segundos e tenta de novo
         if (buscaError || !job) {
             setTimeout(processarFila, 5000); 
             return;
         }
 
-        const job_id = job.id; // Usamos o ID do Supabase como ID da pasta
+        job_id = job.id; 
         console.log(`\n==================================================`);
         console.log(`[FILA] Encontrou vídeo para processar: ${job_id}`);
         console.log(`==================================================`);
 
-        // B. Trava o vídeo no banco para nenhum outro processo (se você escalar) pegar
+        // B. Trava o vídeo no banco 
         await supabase
             .from('videos')
             .update({ status: 'processando' })
             .eq('id', job_id);
 
-        // C. Extrai os dados do vídeo da tabela
-        // IMPORTANTE: Ajuste os nomes das variáveis abaixo para bater EXATAMENTE
-        // com o nome das colunas que você tem na sua tabela `videos`!
+        // C. Extrai os dados do banco (VERIFIQUE OS NOMES DAS COLUNAS AQUI!)
         const audio_url = job.audio_url; 
         const subtitle_url = job.subtitle_url; 
         const subtitle_text = job.subtitle_text;
-        
-        // Assumindo que você salva o JSON das cenas/brolls numa coluna, ex: 'timeline_data' ou 'broll_urls'
-        // Se você não tiver uma coluna com a timeline, você precisa adicionar para o Render saber o que baixar.
         const timeline = job.timeline_data || []; 
         const broll_urls = job.broll_urls || [];
 
-        // D. Configurações de saída (Você pode pegar do banco se tiver, ou usar o padrão)
         const width = DEFAULT_WIDTH;
         const height = DEFAULT_HEIGHT;
         const fps = DEFAULT_FPS;
@@ -121,10 +131,10 @@ async function processarFila() {
         const downloadedClipsMap = {};
 
         // ----------------------------------------------------------------
-        // E. O SEU CÓDIGO ORIGINAL DE GERAÇÃO ENTRA AQUI! (Sem alterações na lógica do FFmpeg)
+        // GERAÇÃO DO VÍDEO COM FFMPEG
         // ----------------------------------------------------------------
         console.log(`[job ${job_id}] baixando áudio...`);
-        if(audio_url) await downloadToFile(audio_url, audioPath); // Verifica se tem audio
+        if(audio_url) await downloadToFile(audio_url, audioPath); 
 
         const urlsToDownload = new Set();
         if (timeline && timeline.length > 0) {
@@ -210,7 +220,6 @@ async function processarFila() {
             "-f", "concat", "-safe", "0", "-i", playlistPath, 
         ];
         
-        // Só adiciona o input de áudio se ele existir e foi baixado
         if(fs.existsSync(audioPath)){
            finalArgs.push("-i", audioPath);
         }
@@ -241,24 +250,37 @@ async function processarFila() {
         console.log(`[job ${job_id}] ffmpeg finalizou ✅`);
 
         // ----------------------------------------------------------------
-        // F. FINALIZAÇÃO: Salva URL no banco e limpa a sujeira
+        // FINALIZAÇÃO: Atualiza banco, avisa Webhook e limpa pasta
         // ----------------------------------------------------------------
         
         const serverUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
         const video_url = `${serverUrl}/videos/${job_id}/output.mp4`;
 
-        // Atualiza a tabela com o status concluído e o link do vídeo
+        // 1. Atualiza o banco
         await supabase
             .from('videos')
             .update({ 
                 status: 'concluido',
-                drive_link: video_url // Usando a URL pública do seu Render para o vídeo
+                drive_link: video_url 
             })
             .eq('id', job_id);
 
         console.log(`[job ${job_id}] ✅ Banco de dados atualizado com sucesso!`);
 
-        // Limpeza agendada do disco do Render
+        // 2. Avisa a Vercel
+        try {
+            console.log(`[job ${job_id}] Enviando aviso para o Webhook da Vercel...`);
+            await callWebhook(WEBHOOK_URL, WEBHOOK_SECRET, { 
+                job_id: job_id, 
+                status: "completed", 
+                video_url: video_url 
+            });
+            console.log(`[job ${job_id}] ✅ Webhook recebido pela Vercel!`);
+        } catch (webhookError) {
+            console.log(`[job ${job_id}] ⚠️ O vídeo foi gerado, mas a Vercel falhou ao receber o Webhook:`, webhookError?.message);
+        }
+
+        // 3. Limpeza
         setTimeout(() => {
             try {
                 fs.rmSync(workDir, { recursive: true, force: true });
@@ -268,21 +290,33 @@ async function processarFila() {
             }
         }, 15 * 60 * 1000); 
 
-        // G. Chama a função DE NOVO imediatamente para pegar o PRÓXIMO vídeo da fila!
+        // 4. Chama o próximo da fila
         processarFila();
 
     } catch (e) {
         console.error(`[FILA ERRO CRÍTICO]`, e?.message || e);
         
-        // Tenta marcar o vídeo atual como 'erro' para não travar a fila nele para sempre
-        // Nota: Idealmente você precisaria do job_id aqui, mas como o erro pode acontecer antes de pegar o ID, 
-        // a fila apenas pausa 10s e tenta de novo.
+        // Se houver job_id, avisa o erro no banco e para o webhook
+        if (job_id) {
+            try {
+                await supabase.from('videos').update({ status: 'erro' }).eq('id', job_id);
+                
+                await callWebhook(WEBHOOK_URL, WEBHOOK_SECRET, { 
+                    job_id: job_id, 
+                    status: "failed", 
+                    error: e?.message || String(e) 
+                });
+            } catch (err2) {
+                console.log("[webhook] ERRO ao atualizar falha:", err2.message);
+            }
+        }
         
+        // Pausa 10s e tenta de novo
         setTimeout(processarFila, 10000); 
     }
 }
 
-// 4. Inicia o motor da fila assim que o servidor subir
+// Inicia o motor da fila
 console.log("Iniciando Worker de Vídeos com Fila Supabase...");
 processarFila();
 
