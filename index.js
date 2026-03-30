@@ -70,7 +70,7 @@ async function processarFila() {
         const { data: job, error: buscaError } = await supabase
             .from('videos')
             .select('*')
-            .eq('status', 'na_fila')
+            .eq('status', 'na_fila') // O status de gatilho
             .order('created_at', { ascending: true })
             .limit(1)
             .single();
@@ -84,23 +84,20 @@ async function processarFila() {
         console.log(`\n==================================================`);
         console.log(`[job ${job_id}] INICIANDO PROCESSAMENTO DA FILA`);
 
-        // 🟢 ETAPA 1: Gerando Narração
-        await supabase.from('videos').update({ status: 'generating_audio' }).eq('id', job_id);
+        // Muda APENAS para processando para "travar" o vídeo na fila do Render.
+        // Não vamos atualizar status intermediários para não bagunçar a Vercel.
+        await supabase.from('videos').update({ status: 'processando' }).eq('id', job_id);
 
         const audio_url = job.narration_audio_url || job.audio_url;
         const subtitle_url = job.subtitle_url || job.captions_url;
         const subtitle_text = job.subtitle_text || job.captions_text;
-        
-        // As URLs que vieram do BrollCuration (Geralmente ~5 links)
         const broll_urls = job.b_roll_video_urls || []; 
         
-        // 🟢 A MÁGICA DOS 20 CORTES: 
-        // Se o banco só deu 5 vídeos, criamos uma timeline artificial de 20 cortes usando eles.
         const timeline = [];
         if (broll_urls.length > 0) {
-            for (let i = 0; i < 20; i++) { // Força a criação de 20 cortes
-                const urlParaUsar = broll_urls[i % broll_urls.length]; // Reusa as URLs
-                timeline.push({ url: urlParaUsar, start: 0 }); // Inicia no tempo 0
+            for (let i = 0; i < 20; i++) {
+                const urlParaUsar = broll_urls[i % broll_urls.length];
+                timeline.push({ url: urlParaUsar, start: 0 });
             }
         }
 
@@ -123,9 +120,6 @@ async function processarFila() {
             await downloadToFile(audio_url, audioPath);
         }
 
-        // 🟢 ETAPA 2: Buscando B-roll
-        await supabase.from('videos').update({ status: 'searching_broll' }).eq('id', job_id);
-
         const urlsToDownload = new Set();
         if (timeline && timeline.length > 0) {
             timeline.forEach(clip => urlsToDownload.add(clip.url || clip.src));
@@ -146,7 +140,7 @@ async function processarFila() {
         const vf = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},format=yuv420p`;
 
         if (timeline && timeline.length > 0) {
-            console.log(`[job ${job_id}] Recortando clipes com base na timeline (Sem loop fixo)...`);
+            console.log(`[job ${job_id}] Recortando clipes com base na timeline...`);
             for (let i = 0; i < timeline.length; i++) {
                 const clip = timeline[i];
                 const rawPath = downloadedClipsMap[clip.url || clip.src];
@@ -155,8 +149,6 @@ async function processarFila() {
                 const normPath = path.join(workDir, `slice_${i}.mp4`);
                 const startTime = clip.start || clip.startTime || clip.ss || 0;
                 const duration = 5; 
-                
-                console.log(`[job ${job_id}] Cortando slice ${i}: início ${startTime}s, duração ${duration}s`);
                 
                 await runFfmpeg([
                     "-y", "-hide_banner", "-loglevel", "error",
@@ -171,7 +163,7 @@ async function processarFila() {
                 normalizedClips.push(normPath);
             }
         } else {
-            console.log(`[job ${job_id}] AVISO: Nenhuma timeline enviada. Processando clipes crus com corte base.`);
+            console.log(`[job ${job_id}] AVISO: Nenhuma timeline enviada. Processando clipes crus.}`);
             let i = 0;
             for (const url in downloadedClipsMap) {
                const normPath = path.join(workDir, `slice_${i}.mp4`);
@@ -196,9 +188,6 @@ async function processarFila() {
         }
         fs.writeFileSync(playlistPath, playlistContent);
 
-        // 🟢 ETAPA 3: Legendas
-        await supabase.from('videos').update({ status: 'generating_subtitles' }).eq('id', job_id);
-
         if (subtitle_url) {
             console.log(`[job ${job_id}] baixando arquivo de legenda...`);
             await downloadToFile(subtitle_url, srtPath);
@@ -209,8 +198,6 @@ async function processarFila() {
             activeSubtitlePath = srtPath;
         }
 
-        // 🟢 ETAPA 4: Montagem Final
-        await supabase.from('videos').update({ status: 'rendering_video' }).eq('id', job_id);
         console.log(`[job ${job_id}] iniciando montagem final do vídeo...`);
 
         const finalArgs = [
@@ -239,11 +226,10 @@ async function processarFila() {
         await runFfmpeg(finalArgs);
         console.log(`[job ${job_id}] ffmpeg finalizou ✅`);
 
-        console.log(`[job ${job_id}] Gerando URL temporária para o webhook...`);
         const serverUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
         const video_url = `${serverUrl}/videos/${job_id}/output.mp4`;
 
-        // 🟢 ETAPA FINAL: Concluído
+        // Aqui, atualizamos para in_review ou concluido, que a Vercel entende
         await supabase.from('videos').update({ status: 'in_review', final_video_url: video_url }).eq('id', job_id);
 
         try {
@@ -257,7 +243,6 @@ async function processarFila() {
             try { fs.rmSync(workDir, { recursive: true, force: true }); } catch (cleanupErr) {}
         }, 15 * 60 * 1000); 
 
-        // Pega o próximo da fila
         setTimeout(processarFila, 1000);
 
     } catch (e) {
@@ -272,6 +257,5 @@ async function processarFila() {
     }
 }
 
-// Inicia o motor
 processarFila();
 app.listen(PORT, () => console.log("Worker rodando na porta", PORT));
