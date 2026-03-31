@@ -142,7 +142,7 @@ app.post("/render", async (req, res) => {
       for (const url of urlsToDownload) {
         const cPath = path.join(workDir, `raw_${index}.mp4`);
         await downloadToFile(url, cPath);
-        downloadClipsMap[url] = cPath;
+        downloadedClipsMap[url] = cPath;
         index++;
       }
 
