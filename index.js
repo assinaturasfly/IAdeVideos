@@ -3,26 +3,37 @@ const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
+const { Queue, Worker } = require("bullmq");
+const IORedis = require("ioredis");
 
 const app = express();
 app.use(express.json({ limit: "50mb" }));
 
-// 🟢 PASSO 1: Expor a pasta temporária publicamente
+// 🟢 Expor a pasta temporária publicamente para a Lovable acessar
 app.use("/videos", express.static("/tmp/video-worker"));
 
 // ---------- CONFIG (Render Env Vars) ----------
 const PORT = process.env.PORT || 3000;
+const REDIS_URL = process.env.REDIS_URL;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const FINAL_BUCKET = process.env.FINAL_BUCKET || "final-videos";
 
 const DEFAULT_WIDTH = parseInt(process.env.DEFAULT_WIDTH || "720", 10);
 const DEFAULT_HEIGHT = parseInt(process.env.DEFAULT_HEIGHT || "1280", 10);
 const DEFAULT_FPS = parseInt(process.env.DEFAULT_FPS || "30", 10);
 
-app.get("/", (req, res) => res.send("OK"));
-app.get("/health", (req, res) => res.json({ ok: true }));
+// ---------- REDIS & QUEUE CONFIG ----------
+if (!REDIS_URL) {
+  console.error("❌ ERRO: Variável REDIS_URL não configurada no Render!");
+}
 
+const connection = new IORedis(REDIS_URL, {
+  maxRetriesPerRequest: null,
+});
+
+const videoQueue = new Queue("video-processing", { connection });
+
+// ---------- FUNÇÕES AUXILIARES ----------
 function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
 }
@@ -43,28 +54,6 @@ async function downloadToFile(url, filePath) {
   });
 }
 
-async function uploadMp4ToSupabase(localFilePath, objectPath) {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    throw new Error("SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY não configurados");
-  }
-  const uploadUrl = `${SUPABASE_URL}/storage/v1/object/${FINAL_BUCKET}/${objectPath}`;
-  const stat = fs.statSync(localFilePath);
-  const stream = fs.createReadStream(localFilePath);
-
-  await axios.put(uploadUrl, stream, {
-    headers: {
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-      "Content-Type": "video/mp4",
-      "Content-Length": stat.size,
-      "x-upsert": "true",
-    },
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity,
-    timeout: 300000,
-  });
-  return `${SUPABASE_URL}/storage/v1/object/public/${FINAL_BUCKET}/${objectPath}`;
-}
-
 async function callWebhook(webhook_url, webhook_secret, payload) {
   await axios.post(webhook_url, payload, {
     headers: {
@@ -77,10 +66,7 @@ async function callWebhook(webhook_url, webhook_secret, payload) {
 
 function runFfmpeg(args) {
   return new Promise((resolve, reject) => {
-    console.log("[ffmpeg] cmd:", `ffmpeg ${args.join(" ")}`);
     const p = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
-    p.stdout.on("data", (d) => console.log("[ffmpeg][out]", d.toString().trim()));
-    p.stderr.on("data", (d) => console.log("[ffmpeg][err]", d.toString().trim()));
     p.on("error", reject);
     p.on("close", (code) => {
       if (code === 0) return resolve();
@@ -89,12 +75,31 @@ function runFfmpeg(args) {
   });
 }
 
+// ---------- ENDPOINT: ADICIONAR NA FILA ----------
 app.post("/render", async (req, res) => {
   const body = req.body || {};
-  const job_id = body.job_id;
-  const webhook_url = body.webhook_url;
-  const webhook_secret = body.webhook_secret;
-  const audio_url = body.audio_url;
+  const { job_id, broll_urls, audio_url } = body;
+
+  if (!job_id || !audio_url || (!broll_urls && !body.timeline)) {
+    return res.status(400).json({ error: "Campos obrigatórios ausentes" });
+  }
+
+  // Adiciona o trabalho na fila do BullMQ
+  const job = await videoQueue.add("render-job", body, {
+    removeOnComplete: true,
+    removeOnFail: false,
+  });
+
+  console.log(`[Queue] Vídeo enfileirado: Job ID ${job_id} (Queue ID: ${job.id})`);
+  
+  // Responde imediatamente para o Supabase/Frontend
+  res.json({ status: "queued", job_id, queue_id: job.id });
+});
+
+// ---------- WORKER: PROCESSAR FILA (1 POR VEZ) ----------
+const worker = new Worker("video-processing", async (job) => {
+  const body = job.data;
+  const { job_id, webhook_url, webhook_secret, audio_url } = body;
   const output_config = body.output_config || {};
   
   const timeline = body.timeline || body.broll_timeline || output_config.timeline || [];
@@ -106,151 +111,123 @@ app.post("/render", async (req, res) => {
   const height = Number(output_config.height || DEFAULT_HEIGHT);
   const fps = Number(output_config.fps || DEFAULT_FPS);
 
-  if (!job_id || !webhook_url || !webhook_secret || !audio_url || broll_urls.length === 0) {
-    return res.status(400).json({ error: "Campos obrigatórios ausentes" });
-  }
+  const workDir = path.join("/tmp", "video-worker", job_id);
+  ensureDir(workDir);
 
-  res.json({ status: "accepted", job_id });
+  const audioPath = path.join(workDir, "audio.mp3");
+  const outputPath = path.join(workDir, "output.mp4");
+  const srtPath = path.join(workDir, "subs.srt");
+  let activeSubtitlePath = null;
+  const downloadedClipsMap = {};
 
-  (async () => {
-    const workDir = path.join("/tmp", "video-worker", job_id);
-    ensureDir(workDir);
-
-    const audioPath = path.join(workDir, "audio.mp3");
-    const outputPath = path.join(workDir, "output.mp4");
-    const srtPath = path.join(workDir, "subs.srt");
+  try {
+    console.log(`[Worker] Iniciando Job ${job_id}...`);
     
-    let activeSubtitlePath = null;
-    const downloadedClipsMap = {};
+    // Download do áudio
+    await downloadToFile(audio_url, audioPath);
 
-    try {
-      console.log(`[job ${job_id}] --------------------------------------------------`);
-      console.log(`[job ${job_id}] INICIANDO: Processando timeline com ${timeline.length} cortes.`);
-      console.log(`[job ${job_id}] --------------------------------------------------`);
-
-      await downloadToFile(audio_url, audioPath);
-
-      const urlsToDownload = new Set();
-      if (timeline && timeline.length > 0) {
-        timeline.forEach(clip => urlsToDownload.add(clip.url || clip.src));
-      } else {
-        broll_urls.forEach(url => urlsToDownload.add(url));
-      }
-
-      console.log(`[job ${job_id}] Baixando ${urlsToDownload.size} vídeos originais...`);
-      let index = 0;
-      for (const url of urlsToDownload) {
-        const cPath = path.join(workDir, `raw_${index}.mp4`);
-        await downloadToFile(url, cPath);
-        downloadedClipsMap[url] = cPath;
-        index++;
-      }
-
-      const normalizedClips = [];
-      const vf = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},format=yuv420p`;
-
-      if (timeline && timeline.length > 0) {
-        for (let i = 0; i < timeline.length; i++) {
-          const clip = timeline[i];
-          const rawPath = downloadedClipsMap[clip.url || clip.src];
-          if (!rawPath) continue;
-
-          const normPath = path.join(workDir, `slice_${i}.mp4`);
-          const startTime = clip.start || clip.startTime || clip.ss || 0;
-          const duration = 5; 
-
-          await runFfmpeg([
-            "-y", "-hide_banner", "-loglevel", "error",
-            "-ss", String(startTime),
-            "-t", String(duration),
-            "-i", rawPath,
-            "-vf", vf,
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-            "-an", normPath
-          ]);
-          normalizedClips.push(normPath);
-        }
-      } else {
-        let i = 0;
-        for (const url in downloadedClipsMap) {
-          const normPath = path.join(workDir, `slice_${i}.mp4`);
-          await runFfmpeg([
-            "-y", "-hide_banner", "-loglevel", "error",
-            "-t", "5",
-            "-i", downloadedClipsMap[url],
-            "-vf", vf,
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-            "-an", normPath
-          ]);
-          normalizedClips.push(normPath);
-          i++;
-        }
-      }
-
-      const playlistPath = path.join(workDir, "playlist.txt");
-      let playlistContent = normalizedClips.map(clip => `file '${clip}'`).join("\n");
-      fs.writeFileSync(playlistPath, playlistContent);
-
-      if (subtitle_url) {
-        await downloadToFile(subtitle_url, srtPath);
-        activeSubtitlePath = srtPath;
-      } else if (subtitle_text) {
-        fs.writeFileSync(srtPath, subtitle_text);
-        activeSubtitlePath = srtPath;
-      }
-
-      const finalArgs = [
-        "-y", "-hide_banner", "-loglevel", "info",
-        "-f", "concat", "-safe", "0", "-i", playlistPath,
-        "-i", audioPath
-      ];
-
-      if (activeSubtitlePath) {
-        let marginV = 90;
-        const forceStyle = `Alignment=2,MarginV=${marginV},Fontname=Montserrat,Bold=1,Fontsize=8,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=0.4.,Shadow=0`;
-        finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${forceStyle}'`);
-      }
-
-      finalArgs.push(
-        "-map", "0:v:0", "-map", "1:a:0",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
-        "-c:a", "aac", "-b:a", "128k",
-        "-movflags", "+faststart", "-shortest", outputPath
-      );
-
-      await runFfmpeg(finalArgs);
-
-      const serverUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
-      const video_url = `${serverUrl}/videos/${job_id}/output.mp4`;
-
-      try {
-        await callWebhook(webhook_url, webhook_secret, { job_id, status: "completed", video_url });
-        console.log(`[job ${job_id}] ✅ Webhook enviado com sucesso!`);
-      } catch (webhookError) {
-        console.log(`[job ${job_id}] ⚠️ Erro no webhook da Lovable:`, webhookError?.response?.data || webhookError.message);
-      }
-
-      setTimeout(() => {
-        try {
-          if (fs.existsSync(workDir)) {
-            fs.rmSync(workDir, { recursive: true, force: true });
-            console.log(`[job ${job_id}] 🧹 Pasta temporária limpa.`);
-          }
-        } catch (cleanupErr) {
-          console.log(`[job ${job_id}] ⚠️ Erro ao limpar:`, cleanupErr.message);
-        }
-      }, 15 * 60 * 1000);
-
-    } catch (e) {
-      console.log(`[job ${job_id}] FALHOU:`, e?.message || e);
-      try {
-        await callWebhook(webhook_url, webhook_secret, { job_id, status: "failed", error: e?.message || String(e) });
-      } catch (err2) {
-        console.log("[webhook] ERRO ao enviar falha");
-      }
-      if (fs.existsSync(workDir)) fs.rmSync(workDir, { recursive: true, force: true });
+    const urlsToDownload = new Set();
+    if (timeline && timeline.length > 0) {
+      timeline.forEach(clip => urlsToDownload.add(clip.url || clip.src));
+    } else {
+      broll_urls.forEach(url => urlsToDownload.add(url));
     }
-  })();
+
+    // Download dos clipes
+    console.log(`[job ${job_id}] Baixando clipes originais...`);
+    let index = 0;
+    for (const url of urlsToDownload) {
+      const cPath = path.join(workDir, `raw_${index}.mp4`);
+      await downloadToFile(url, cPath);
+      downloadedClipsMap[url] = cPath; // 🟢 Corrigido aqui
+      index++;
+    }
+
+    const normalizedClips = [];
+    const vf = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},format=yuv420p`;
+
+    // Processar clipes com FFmpeg
+    console.log(`[job ${job_id}] Normalizando clipes...`);
+    if (timeline && timeline.length > 0) {
+      for (let i = 0; i < timeline.length; i++) {
+        const clip = timeline[i];
+        const rawPath = downloadedClipsMap[clip.url || clip.src];
+        if (!rawPath) continue;
+
+        const normPath = path.join(workDir, `slice_${i}.mp4`);
+        const startTime = clip.start || clip.startTime || clip.ss || 0;
+        
+        await runFfmpeg([
+          "-y", "-ss", String(startTime), "-t", "5", "-i", rawPath,
+          "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-an", normPath
+        ]);
+        normalizedClips.push(normPath);
+      }
+    } else {
+      let i = 0;
+      for (const url in downloadedClipsMap) {
+        const normPath = path.join(workDir, `slice_${i}.mp4`);
+        await runFfmpeg([
+          "-y", "-t", "5", "-i", downloadedClipsMap[url],
+          "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-an", normPath
+        ]);
+        normalizedClips.push(normPath);
+        i++;
+      }
+    }
+
+    // Gerar Playlist para concatenação
+    const playlistPath = path.join(workDir, "playlist.txt");
+    fs.writeFileSync(playlistPath, normalizedClips.map(clip => `file '${clip}'`).join("\n"));
+
+    // Sublegendas
+    if (subtitle_url) {
+      await downloadToFile(subtitle_url, srtPath);
+      activeSubtitlePath = srtPath;
+    } else if (subtitle_text) {
+      fs.writeFileSync(srtPath, subtitle_text);
+      activeSubtitlePath = srtPath;
+    }
+
+    // Render Final
+    console.log(`[job ${job_id}] Renderizando vídeo final...`);
+    const finalArgs = [
+      "-y", "-f", "concat", "-safe", "0", "-i", playlistPath, "-i", audioPath
+    ];
+
+    if (activeSubtitlePath) {
+      const forceStyle = `Alignment=2,MarginV=90,Fontname=Montserrat,Bold=1,Fontsize=8`;
+      finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${forceStyle}'`);
+    }
+
+    finalArgs.push(
+      "-map", "0:v:0", "-map", "1:a:0",
+      "-c:v", "libx264", "-preset", "ultrafast", "-shortest", outputPath
+    );
+
+    await runFfmpeg(finalArgs);
+
+    // Enviar Webhook de Sucesso
+    const serverUrl = process.env.RENDER_EXTERNAL_URL || `https://${process.env.RENDER_HOSTNAME}`;
+    const video_url = `${serverUrl}/videos/${job_id}/output.mp4`;
+
+    await callWebhook(webhook_url, webhook_secret, { job_id, status: "completed", video_url });
+    console.log(`[job ${job_id}] ✅ Vídeo finalizado e webhook enviado!`);
+
+  } catch (e) {
+    console.error(`[Worker Job ${job_id}] FALHOU:`, e.message);
+    await callWebhook(webhook_url, webhook_secret, { job_id, status: "failed", error: e.message });
+    throw e; // Permite que o BullMQ registre a falha
+  } finally {
+    // Limpeza automática após 15 minutos (para dar tempo de baixar)
+    setTimeout(() => {
+      if (fs.existsSync(workDir)) fs.rmSync(workDir, { recursive: true, force: true });
+    }, 15 * 60 * 1000);
+  }
+}, { 
+  connection,
+  concurrency: 1 // 🟢 IMPORTANTE: Só um vídeo por vez para aguentar os 50/hora
 });
 
-app.listen(PORT, () => console.log("Worker rodando na porta", PORT));
+app.get("/", (req, res) => res.send("Worker de Vídeo com Fila - Ativo"));
+app.listen(PORT, () => console.log("Servidor rodando na porta", PORT));
