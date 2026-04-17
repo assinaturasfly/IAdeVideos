@@ -139,7 +139,7 @@ const worker = new Worker("video-processing", async (job) => {
     for (const url of urlsToDownload) {
       const cPath = path.join(workDir, `raw_${index}.mp4`);
       await downloadToFile(url, cPath);
-      downloadedClipsMap[url] = cPath; // 🟢 Corrigido aqui
+      downloadedClipsMap[url] = cPath;
       index++;
     }
 
@@ -189,7 +189,7 @@ const worker = new Worker("video-processing", async (job) => {
       activeSubtitlePath = srtPath;
     }
 
-   // Render Final
+    // Render Final com Logo
     console.log(`[job ${job_id}] Renderizando vídeo final...`);
     const finalArgs = [
       "-y", "-f", "concat", "-safe", "0", "-i", playlistPath, "-i", audioPath
@@ -233,3 +233,28 @@ const worker = new Worker("video-processing", async (job) => {
     );
 
     await runFfmpeg(finalArgs);
+
+    // Enviar Webhook de Sucesso (O que tinha sido apagado!)
+    const serverUrl = process.env.RENDER_EXTERNAL_URL || `https://${process.env.RENDER_HOSTNAME}`;
+    const video_url = `${serverUrl}/videos/${job_id}/output.mp4`;
+
+    await callWebhook(webhook_url, webhook_secret, { job_id, status: "completed", video_url });
+    console.log(`[job ${job_id}] ✅ Vídeo finalizado e webhook enviado!`);
+
+  } catch (e) {
+    console.error(`[Worker Job ${job_id}] FALHOU:`, e.message);
+    await callWebhook(webhook_url, webhook_secret, { job_id, status: "failed", error: e.message });
+    throw e; // Permite que o BullMQ registre a falha
+  } finally {
+    // Limpeza automática após 15 minutos (para dar tempo de baixar)
+    setTimeout(() => {
+      if (fs.existsSync(workDir)) fs.rmSync(workDir, { recursive: true, force: true });
+    }, 15 * 60 * 1000);
+  }
+}, { 
+  connection,
+  concurrency: 1 // 🟢 IMPORTANTE: Só um vídeo por vez para aguentar os 50/hora
+});
+
+app.get("/", (req, res) => res.send("Worker de Vídeo com Fila - Ativo"));
+app.listen(PORT, () => console.log("Servidor rodando na porta", PORT));
