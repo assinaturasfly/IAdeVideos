@@ -189,45 +189,47 @@ const worker = new Worker("video-processing", async (job) => {
       activeSubtitlePath = srtPath;
     }
 
-    // Render Final
+   // Render Final
     console.log(`[job ${job_id}] Renderizando vídeo final...`);
     const finalArgs = [
       "-y", "-f", "concat", "-safe", "0", "-i", playlistPath, "-i", audioPath
     ];
 
-    if (activeSubtitlePath) {
-      const forceStyle = `Alignment=2,MarginV=90,Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
-      finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${forceStyle}'`);
+    // 1. Puxa a logo do payload e faz o download se existir
+    const logo_url = body.logo_url;
+    if (logo_url) {
+      console.log(`[job ${job_id}] Baixando logo da agência...`);
+      await downloadToFile(logo_url, path.join(workDir, "logo.png"));
+      finalArgs.push("-i", path.join(workDir, "logo.png"));
     }
 
+    let videoMap = "0:v:0";
+    const forceStyle = `Alignment=2,MarginV=90,Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
+
+    // 2. Calcula quando a logo deve aparecer (últimos 5 segundos)
+    const estimatedDuration = normalizedClips.length * 5;
+    const showLogoFrom = Math.max(0, estimatedDuration - 5);
+
+    // 3. Monta a árvore de filtros (Legenda + Logo)
+    if (activeSubtitlePath && logo_url) {
+      // Vídeo 0 (playlist) recebe legenda -> Vídeo 2 (logo) é redimensionada -> Junta os dois
+      const filterComplex = `[0:v]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=350:-1[logo];[subbed][logo]overlay=(W-w)/2:120:enable='gte(t,${showLogoFrom})'[v]`;
+      finalArgs.push("-filter_complex", filterComplex);
+      videoMap = "[v]";
+    } else if (activeSubtitlePath && !logo_url) {
+      // Só legenda (Padrão original)
+      finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${forceStyle}'`);
+    } else if (!activeSubtitlePath && logo_url) {
+      // Só logo
+      const filterComplex = `[2:v]scale=350:-1[logo];[0:v][logo]overlay=(W-w)/2:120:enable='gte(t,${showLogoFrom})'[v]`;
+      finalArgs.push("-filter_complex", filterComplex);
+      videoMap = "[v]";
+    }
+
+    // 4. Conclui a montagem e renderiza
     finalArgs.push(
-      "-map", "0:v:0", "-map", "1:a:0",
+      "-map", videoMap, "-map", "1:a:0",
       "-c:v", "libx264", "-preset", "ultrafast", "-shortest", outputPath
     );
 
     await runFfmpeg(finalArgs);
-
-    // Enviar Webhook de Sucesso
-    const serverUrl = process.env.RENDER_EXTERNAL_URL || `https://${process.env.RENDER_HOSTNAME}`;
-    const video_url = `${serverUrl}/videos/${job_id}/output.mp4`;
-
-    await callWebhook(webhook_url, webhook_secret, { job_id, status: "completed", video_url });
-    console.log(`[job ${job_id}] ✅ Vídeo finalizado e webhook enviado!`);
-
-  } catch (e) {
-    console.error(`[Worker Job ${job_id}] FALHOU:`, e.message);
-    await callWebhook(webhook_url, webhook_secret, { job_id, status: "failed", error: e.message });
-    throw e; // Permite que o BullMQ registre a falha
-  } finally {
-    // Limpeza automática após 15 minutos (para dar tempo de baixar)
-    setTimeout(() => {
-      if (fs.existsSync(workDir)) fs.rmSync(workDir, { recursive: true, force: true });
-    }, 15 * 60 * 1000);
-  }
-}, { 
-  connection,
-  concurrency: 1 // 🟢 IMPORTANTE: Só um vídeo por vez para aguentar os 50/hora
-});
-
-app.get("/", (req, res) => res.send("Worker de Vídeo com Fila - Ativo"));
-app.listen(PORT, () => console.log("Servidor rodando na porta", PORT));
