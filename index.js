@@ -220,7 +220,7 @@ const worker = new Worker("video-processing", async (job) => {
       finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${forceStyle}'`);
     } else if (!activeSubtitlePath && logo_url) {
       // Só logo
-      const filterComplex = `[2:v]scale=350:-1[logo];[0:v][logo]overlay=(W-w)/2:120:enable='gte(t,${showLogoFrom})'[v]`;
+      const filterComplex = `[2:v]scale=350:-1[logo];[0:v][logo]overlay=(W-w)/2:100:enable='gte(t,${showLogoFrom})'[v]`;
       finalArgs.push("-filter_complex", filterComplex);
       videoMap = "[v]";
     }
