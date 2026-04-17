@@ -207,8 +207,7 @@ const worker = new Worker("video-processing", async (job) => {
     const forceStyle = `Alignment=2,MarginV=90,Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
 
     // 2. Calcula quando a logo deve aparecer (últimos 5 segundos)
-    const estimatedDuration = normalizedClips.length * 5;
-    const showLogoFrom = Math.max(0, estimatedDuration - 5);
+    const showLogoFrom = 0;
 
     // 3. Monta a árvore de filtros (Legenda + Logo)
     if (activeSubtitlePath && logo_url) {
