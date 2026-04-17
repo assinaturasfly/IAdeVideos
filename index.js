@@ -207,12 +207,13 @@ const worker = new Worker("video-processing", async (job) => {
     const forceStyle = `Alignment=2,MarginV=90,Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
 
     // 2. Calcula quando a logo deve aparecer (últimos 5 segundos)
-    const showLogoFrom = 0;
+    const estimatedDuration = normalizedClips.length * 5;
+    const showLogoFrom = Math.max(0, estimatedDuration - 5);
 
     // 3. Monta a árvore de filtros (Legenda + Logo)
     if (activeSubtitlePath && logo_url) {
       // Vídeo 0 (playlist) recebe legenda -> Vídeo 2 (logo) é redimensionada -> Junta os dois
-      const filterComplex = `[0:v]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=350:-1[logo];[subbed][logo]overlay=(W-w)/2:120:enable='gte(t,${showLogoFrom})'[v]`;
+      const filterComplex = `[0:v]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=350:-1[logo];[subbed][logo]overlay=(W-w)/2:40:enable='gte(t,${showLogoFrom})'[v]`;
       finalArgs.push("-filter_complex", filterComplex);
       videoMap = "[v]";
     } else if (activeSubtitlePath && !logo_url) {
@@ -220,7 +221,7 @@ const worker = new Worker("video-processing", async (job) => {
       finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${forceStyle}'`);
     } else if (!activeSubtitlePath && logo_url) {
       // Só logo
-      const filterComplex = `[2:v]scale=350:-1[logo];[0:v][logo]overlay=(W-w)/2:80:enable='gte(t,${showLogoFrom})'[v]`;
+      const filterComplex = `[2:v]scale=350:-1[logo];[0:v][logo]overlay=(W-w)/2:40:enable='gte(t,${showLogoFrom})'[v]`;
       finalArgs.push("-filter_complex", filterComplex);
       videoMap = "[v]";
     }
@@ -233,7 +234,7 @@ const worker = new Worker("video-processing", async (job) => {
 
     await runFfmpeg(finalArgs);
 
-    // Enviar Webhook de Sucesso (O que tinha sido apagado!)
+    // Enviar Webhook de Sucesso
     const serverUrl = process.env.RENDER_EXTERNAL_URL || `https://${process.env.RENDER_HOSTNAME}`;
     const video_url = `${serverUrl}/videos/${job_id}/output.mp4`;
 
