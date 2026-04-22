@@ -75,6 +75,25 @@ function runFfmpeg(args) {
   });
 }
 
+// NOVO: Função para descobrir a duração real do áudio usando ffprobe
+function getMediaDuration(filePath) {
+  return new Promise((resolve) => {
+    const p = spawn("ffprobe", [
+      "-v", "error",
+      "-show_entries", "format=duration",
+      "-of", "default=noprint_wrappers=1:nokey=1",
+      filePath
+    ]);
+    let output = "";
+    p.stdout.on("data", (data) => output += data.toString());
+    p.on("close", () => {
+      const dur = parseFloat(output.trim());
+      resolve(isNaN(dur) ? 0 : dur);
+    });
+    p.on("error", () => resolve(0));
+  });
+}
+
 // ---------- ENDPOINT: ADICIONAR NA FILA ----------
 app.post("/render", async (req, res) => {
   const body = req.body || {};
@@ -125,6 +144,10 @@ const worker = new Worker("video-processing", async (job) => {
     
     // Download do áudio
     await downloadToFile(audio_url, audioPath);
+    
+    // Descobre o tempo exato do áudio
+    const actualAudioDuration = await getMediaDuration(audioPath);
+    console.log(`[job ${job_id}] Duração real do áudio: ${actualAudioDuration} segundos`);
 
     const urlsToDownload = new Set();
     if (timeline && timeline.length > 0) {
@@ -206,21 +229,18 @@ const worker = new Worker("video-processing", async (job) => {
     let videoMap = "0:v:0";
     const forceStyle = `Alignment=2,MarginV=90,Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
 
-    // 2. Calcula quando a logo deve aparecer (últimos 5 segundos)
-    const estimatedDuration = normalizedClips.length * 5;
-    const showLogoFrom = Math.max(0, estimatedDuration - 5);
+    // 2. Calcula quando a logo deve aparecer (Agora baseado na duração real do áudio - Últimos 3 segundos!)
+    const totalVideoLength = (actualAudioDuration > 0) ? actualAudioDuration : (normalizedClips.length * 5);
+    const showLogoFrom = Math.max(0, totalVideoLength - 3);
 
     // 3. Monta a árvore de filtros (Legenda + Logo)
     if (activeSubtitlePath && logo_url) {
-      // Vídeo 0 (playlist) recebe legenda -> Vídeo 2 (logo) é redimensionada -> Junta os dois
       const filterComplex = `[0:v]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=350:-1[logo];[subbed][logo]overlay=(W-w)/2:40:enable='gte(t,${showLogoFrom})'[v]`;
       finalArgs.push("-filter_complex", filterComplex);
       videoMap = "[v]";
     } else if (activeSubtitlePath && !logo_url) {
-      // Só legenda (Padrão original)
       finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${forceStyle}'`);
     } else if (!activeSubtitlePath && logo_url) {
-      // Só logo
       const filterComplex = `[2:v]scale=350:-1[logo];[0:v][logo]overlay=(W-w)/2:40:enable='gte(t,${showLogoFrom})'[v]`;
       finalArgs.push("-filter_complex", filterComplex);
       videoMap = "[v]";
@@ -246,14 +266,14 @@ const worker = new Worker("video-processing", async (job) => {
     await callWebhook(webhook_url, webhook_secret, { job_id, status: "failed", error: e.message });
     throw e; // Permite que o BullMQ registre a falha
   } finally {
-    // Limpeza automática após 15 minutos (para dar tempo de baixar)
+    // Limpeza automática após 15 minutos
     setTimeout(() => {
       if (fs.existsSync(workDir)) fs.rmSync(workDir, { recursive: true, force: true });
     }, 15 * 60 * 1000);
   }
 }, { 
   connection,
-  concurrency: 1 // 🟢 IMPORTANTE: Só um vídeo por vez para aguentar os 50/hora
+  concurrency: 1 
 });
 
 app.get("/", (req, res) => res.send("Worker de Vídeo com Fila - Ativo"));
