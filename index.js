@@ -167,7 +167,9 @@ const worker = new Worker("video-processing", async (job) => {
     }
 
     const normalizedClips = [];
-    const vf = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},format=yuv420p`;
+    
+    // 🟢 AQUI ESTÁ A MÁGICA: Filtro unsharp adicionado para dar nitidez!
+    const vf = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},format=yuv420p,unsharp=5:5:0.8:5:5:0.0`;
 
     // Processar clipes com FFmpeg
     console.log(`[job ${job_id}] Normalizando clipes...`);
