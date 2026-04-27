@@ -168,8 +168,10 @@ const worker = new Worker("video-processing", async (job) => {
 
     const normalizedClips = [];
     
-    // 🟢 AQUI ESTÁ A MÁGICA: Filtro unsharp adicionado para dar nitidez!
-    const vf = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},format=yuv420p,unsharp=5:5:0.8:5:5:0.0`;
+    // 🟢 MELHORIA DE IMAGEM AQUI:
+    // Adicionado eq=contrast=1.05:saturation=1.1 (Contraste +5%, Saturação +10%)
+    // Mantido unsharp para nitidez e format=yuv420p para compatibilidade.
+    const vf = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},eq=contrast=1.05:saturation=1.1,unsharp=5:5:0.8:5:5:0.0,format=yuv420p`;
 
     // Processar clipes com FFmpeg
     console.log(`[job ${job_id}] Normalizando clipes...`);
@@ -182,9 +184,10 @@ const worker = new Worker("video-processing", async (job) => {
         const normPath = path.join(workDir, `slice_${i}.mp4`);
         const startTime = clip.start || clip.startTime || clip.ss || 0;
         
+        // Mantido Preset Veryfast e CRF 18 para alta qualidade sem travar o Render
         await runFfmpeg([
           "-y", "-ss", String(startTime), "-t", "5", "-i", rawPath,
-          "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-an", normPath
+          "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-an", normPath
         ]);
         normalizedClips.push(normPath);
       }
@@ -192,9 +195,11 @@ const worker = new Worker("video-processing", async (job) => {
       let i = 0;
       for (const url in downloadedClipsMap) {
         const normPath = path.join(workDir, `slice_${i}.mp4`);
+        
+        // Mantido Preset Veryfast e CRF 18
         await runFfmpeg([
           "-y", "-t", "5", "-i", downloadedClipsMap[url],
-          "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-an", normPath
+          "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-an", normPath
         ]);
         normalizedClips.push(normPath);
         i++;
@@ -231,7 +236,7 @@ const worker = new Worker("video-processing", async (job) => {
     let videoMap = "0:v:0";
     const forceStyle = `Alignment=2,MarginV=90,Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
 
-    // 2. Calcula quando a logo deve aparecer (Agora baseado na duração real do áudio - Últimos 3 segundos!)
+    // 2. Calcula quando a logo deve aparecer
     const totalVideoLength = (actualAudioDuration > 0) ? actualAudioDuration : (normalizedClips.length * 5);
     const showLogoFrom = Math.max(0, totalVideoLength - 3);
 
@@ -248,10 +253,11 @@ const worker = new Worker("video-processing", async (job) => {
       videoMap = "[v]";
     }
 
-    // 4. Conclui a montagem e renderiza
+    // 4. Conclui a montagem e renderiza 
+    // Mantido CRF 18, Preset Veryfast e Pix_fmt para garantir cores corretas no celular
     finalArgs.push(
       "-map", videoMap, "-map", "1:a:0",
-      "-c:v", "libx264", "-preset", "ultrafast", "-shortest", outputPath
+      "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-shortest", outputPath
     );
 
     await runFfmpeg(finalArgs);
