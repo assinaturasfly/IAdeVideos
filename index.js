@@ -169,9 +169,9 @@ const worker = new Worker("video-processing", async (job) => {
     const normalizedClips = [];
     
     // 🟢 MELHORIA DE IMAGEM AQUI:
-    // Adicionado eq=contrast=1.05:saturation=1.1 (Contraste +5%, Saturação +10%)
-    // Mantido unsharp para nitidez e format=yuv420p para compatibilidade.
-    const vf = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},eq=contrast=1.05:saturation=1.1,unsharp=5:5:0.8:5:5:0.0,format=yuv420p`;
+    // Adicionado flags=lanczos no redimensionamento para alta fidelidade visual.
+    // Mantido eq=contrast=1.05:saturation=1.1, unsharp e format=yuv420p.
+    const vf = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width}:${height},eq=contrast=1.05:saturation=1.1,unsharp=5:5:0.8:5:5:0.0,format=yuv420p`;
 
     // Processar clipes com FFmpeg
     console.log(`[job ${job_id}] Normalizando clipes...`);
@@ -184,7 +184,6 @@ const worker = new Worker("video-processing", async (job) => {
         const normPath = path.join(workDir, `slice_${i}.mp4`);
         const startTime = clip.start || clip.startTime || clip.ss || 0;
         
-        // Mantido Preset Veryfast e CRF 18 para alta qualidade sem travar o Render
         await runFfmpeg([
           "-y", "-ss", String(startTime), "-t", "5", "-i", rawPath,
           "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-an", normPath
@@ -196,7 +195,6 @@ const worker = new Worker("video-processing", async (job) => {
       for (const url in downloadedClipsMap) {
         const normPath = path.join(workDir, `slice_${i}.mp4`);
         
-        // Mantido Preset Veryfast e CRF 18
         await runFfmpeg([
           "-y", "-t", "5", "-i", downloadedClipsMap[url],
           "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-an", normPath
@@ -254,7 +252,6 @@ const worker = new Worker("video-processing", async (job) => {
     }
 
     // 4. Conclui a montagem e renderiza 
-    // Mantido CRF 18, Preset Veryfast e Pix_fmt para garantir cores corretas no celular
     finalArgs.push(
       "-map", videoMap, "-map", "1:a:0",
       "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-shortest", outputPath
