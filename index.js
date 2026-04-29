@@ -115,7 +115,7 @@ const worker = new Worker("video-processing", async (job) => {
     console.log(`⚙️ [JOB ${job_id}] ETAPA 2: Aplicando Nitidez e Cores nos clipes...`);
     for (let i = 0; i < downloadedClips.length; i++) {
       const normPath = path.join(workDir, `slice_${i}.mp4`);
-      await runFfmpeg(["-ss", "0", "-t", "5", "-i", downloadedClips[i], "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-an", normPath], `Corte do Clipe ${i+1}/${downloadedClips.length}`);
+      await runFfmpeg(["-ss", "0", "-t", "5", "-i", downloadedClips[i], "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-an", normPath], `Corte do Clipe ${i+1}/${downloadedClips.length}`);
       normalizedClips.push(normPath);
     }
 
@@ -161,7 +161,7 @@ const worker = new Worker("video-processing", async (job) => {
       videoMap = "[v]";
     }
 
-    finalArgs.push("-map", videoMap, "-map", "1:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-shortest", outputPath);
+    finalArgs.push("-map", videoMap, "-map", "1:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p", "-shortest", outputPath);
 
     await runFfmpeg(finalArgs, "Renderização Final");
 
