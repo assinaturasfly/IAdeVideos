@@ -109,7 +109,7 @@ const worker = new Worker("video-processing", async (job) => {
       downloadedClips.push(p);
     }
 
-    const vf = `fps=30,scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},eq=contrast=1.05:saturation=1.1,unsharp=5:5:0.8:5:5:0.0,format=yuv420p`;
+    const vf = `fps=30,scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},eq=contrast=1.05:saturation=1.3,unsharp=5:5:0.8:5:5:0.0,format=yuv420p`;
     const normalizedClips = [];
 
     console.log(`⚙️ [JOB ${job_id}] ETAPA 2: Aplicando Nitidez e Cores nos clipes...`);
