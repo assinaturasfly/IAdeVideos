@@ -66,8 +66,11 @@ async function callWebhook(webhook_url, webhook_secret, payload) {
 
 function runFfmpeg(args) {
   return new Promise((resolve, reject) => {
-    // 🟢 ALTERADO AQUI: stdio "inherit" para o FFmpeg cuspir o log real no Render e não travar o buffer
-    const p = spawn("ffmpeg", args, { stdio: "inherit" });
+    // 🟢 ALTERADO AQUI: Força a sobrescrita (-y) e ignora o teclado (stdin)
+    // stdio ["ignore", "inherit", "inherit"] tapa os ouvidos do FFmpeg para não travar o servidor
+    const finalArgs = ["-y", ...args];
+    const p = spawn("ffmpeg", finalArgs, { stdio: ["ignore", "inherit", "inherit"] });
+    
     p.on("error", reject);
     p.on("close", (code) => {
       if (code === 0) return resolve();
@@ -169,7 +172,7 @@ const worker = new Worker("video-processing", async (job) => {
 
     const normalizedClips = [];
     
-    // 🟢 ALTERADO AQUI: Removido flags=lanczos para evitar falta de memória.
+    // 🟢 MANTIDO: Filtros de cor e nitidez sem o lanczos pesado.
     const vf = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},eq=contrast=1.05:saturation=1.1,unsharp=5:5:0.8:5:5:0.0,format=yuv420p`;
 
     // Processar clipes com FFmpeg
@@ -184,7 +187,7 @@ const worker = new Worker("video-processing", async (job) => {
         const startTime = clip.start || clip.startTime || clip.ss || 0;
         
         await runFfmpeg([
-          "-y", "-ss", String(startTime), "-t", "5", "-i", rawPath,
+          "-ss", String(startTime), "-t", "5", "-i", rawPath,
           "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-an", normPath
         ]);
         normalizedClips.push(normPath);
@@ -195,7 +198,7 @@ const worker = new Worker("video-processing", async (job) => {
         const normPath = path.join(workDir, `slice_${i}.mp4`);
         
         await runFfmpeg([
-          "-y", "-t", "5", "-i", downloadedClipsMap[url],
+          "-t", "5", "-i", downloadedClipsMap[url],
           "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-an", normPath
         ]);
         normalizedClips.push(normPath);
@@ -219,7 +222,7 @@ const worker = new Worker("video-processing", async (job) => {
     // Render Final com Logo
     console.log(`[job ${job_id}] Renderizando vídeo final...`);
     const finalArgs = [
-      "-y", "-f", "concat", "-safe", "0", "-i", playlistPath, "-i", audioPath
+      "-f", "concat", "-safe", "0", "-i", playlistPath, "-i", audioPath
     ];
 
     // 1. Puxa a logo do payload e faz o download se existir
