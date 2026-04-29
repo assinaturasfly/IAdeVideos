@@ -66,7 +66,8 @@ async function callWebhook(webhook_url, webhook_secret, payload) {
 
 function runFfmpeg(args) {
   return new Promise((resolve, reject) => {
-    const p = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
+    // 🟢 ALTERADO AQUI: stdio "inherit" para o FFmpeg cuspir o log real no Render e não travar o buffer
+    const p = spawn("ffmpeg", args, { stdio: "inherit" });
     p.on("error", reject);
     p.on("close", (code) => {
       if (code === 0) return resolve();
@@ -168,10 +169,8 @@ const worker = new Worker("video-processing", async (job) => {
 
     const normalizedClips = [];
     
-    // 🟢 MELHORIA DE IMAGEM AQUI:
-    // Adicionado flags=lanczos no redimensionamento para alta fidelidade visual.
-    // Mantido eq=contrast=1.05:saturation=1.1, unsharp e format=yuv420p.
-    const vf = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width}:${height},eq=contrast=1.05:saturation=1.1,unsharp=5:5:0.8:5:5:0.0,format=yuv420p`;
+    // 🟢 ALTERADO AQUI: Removido flags=lanczos para evitar falta de memória.
+    const vf = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},eq=contrast=1.05:saturation=1.1,unsharp=5:5:0.8:5:5:0.0,format=yuv420p`;
 
     // Processar clipes com FFmpeg
     console.log(`[job ${job_id}] Normalizando clipes...`);
