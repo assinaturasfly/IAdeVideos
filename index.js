@@ -16,6 +16,9 @@ const REDIS_URL = process.env.REDIS_URL;
 const connection = new IORedis(REDIS_URL, { maxRetriesPerRequest: null });
 const videoQueue = new Queue("video-processing", { connection });
 
+// Limpeza de segurança (se ainda houver vídeos travados antigos, isso vai limpar ao reiniciar)
+videoQueue.obliterate({ force: true }).catch(() => {});
+
 // Função para rodar o FFmpeg de forma silenciosa e limpa
 function runFfmpeg(args, stepName = "Processando") {
   return new Promise((resolve, reject) => {
@@ -69,10 +72,9 @@ app.post("/render", async (req, res) => {
   const { job_id, broll_urls, audio_url } = req.body;
   if (!job_id || !audio_url) return res.status(400).json({ error: "Dados ausentes" });
 
-  // Adicionamos attempts: 1 para ele não ficar tentando pra sempre se der erro
   const job = await videoQueue.add("render-job", req.body, { 
     removeOnComplete: true, 
-    removeOnFail: { age: 3600 }, // Remove falhas após 1 hora
+    removeOnFail: { age: 3600 }, 
     attempts: 1 
   });
 
@@ -91,6 +93,7 @@ const worker = new Worker("video-processing", async (job) => {
     fs.mkdirSync(workDir, { recursive: true });
     const audioPath = path.join(workDir, "audio.mp3");
     const outputPath = path.join(workDir, "output.mp4");
+    const srtPath = path.join(workDir, "subs.srt");
 
     console.log(`📦 [JOB ${job_id}] PREPARANDO: Baixando áudio...`);
     await downloadToFile(audio_url, audioPath);
@@ -119,12 +122,46 @@ const worker = new Worker("video-processing", async (job) => {
     const playlistPath = path.join(workDir, "playlist.txt");
     fs.writeFileSync(playlistPath, normalizedClips.map(p => `file '${p}'`).join("\n"));
 
+    // Lógica das Legendas Restaurada
+    let activeSubtitlePath = null;
+    const subtitle_url = job.data.subtitle_url || output_config.subtitle_url;
+    const subtitle_text = job.data.subtitle_text || output_config.subtitle_text;
+
+    if (subtitle_url) {
+      await downloadToFile(subtitle_url, srtPath);
+      activeSubtitlePath = srtPath;
+    } else if (subtitle_text) {
+      fs.writeFileSync(srtPath, subtitle_text);
+      activeSubtitlePath = srtPath;
+    }
+
     console.log(`🎬 [JOB ${job_id}] ETAPA 3: Montagem Final (Vídeo + Áudio + Estilo)...`);
     const finalArgs = ["-f", "concat", "-safe", "0", "-i", playlistPath, "-i", audioPath];
     
-    // Filtro de legenda/logo simplificado para o log
-    let filter = "[0:v]copy[v]"; 
-    finalArgs.push("-map", "[v]", "-map", "1:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-shortest", outputPath);
+    // Lógica da Logo Restaurada
+    if (logo_url) {
+      await downloadToFile(logo_url, path.join(workDir, "logo.png"));
+      finalArgs.push("-i", path.join(workDir, "logo.png"));
+    }
+
+    let videoMap = "0:v:0";
+    const forceStyle = `Alignment=2,MarginV=90,Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
+    const totalVideoLength = (duration > 0) ? duration : (normalizedClips.length * 5);
+    const showLogoFrom = Math.max(0, totalVideoLength - 3);
+
+    if (activeSubtitlePath && logo_url) {
+      const filterComplex = `[0:v]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=350:-1[logo];[subbed][logo]overlay=(W-w)/2:40:enable='gte(t,${showLogoFrom})'[v]`;
+      finalArgs.push("-filter_complex", filterComplex);
+      videoMap = "[v]";
+    } else if (activeSubtitlePath && !logo_url) {
+      finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${forceStyle}'`);
+    } else if (!activeSubtitlePath && logo_url) {
+      const filterComplex = `[2:v]scale=350:-1[logo];[0:v][logo]overlay=(W-w)/2:40:enable='gte(t,${showLogoFrom})'[v]`;
+      finalArgs.push("-filter_complex", filterComplex);
+      videoMap = "[v]";
+    }
+
+    finalArgs.push("-map", videoMap, "-map", "1:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-shortest", outputPath);
 
     await runFfmpeg(finalArgs, "Renderização Final");
 
@@ -137,6 +174,10 @@ const worker = new Worker("video-processing", async (job) => {
   } catch (e) {
     console.error(`💥 [JOB ${job_id}] ERRO CRÍTICO:`, e.message);
     await axios.post(webhook_url, { job_id, status: "failed", error: e.message }, { headers: { "x-webhook-secret": webhook_secret } });
+  } finally {
+    setTimeout(() => {
+      if (fs.existsSync(workDir)) fs.rmSync(workDir, { recursive: true, force: true });
+    }, 15 * 60 * 1000);
   }
 }, { connection, concurrency: 1 });
 
