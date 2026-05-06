@@ -5,6 +5,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { Queue, Worker } = require("bullmq");
 const IORedis = require("ioredis");
+const { google } = require("googleapis"); // Biblioteca do Google
 
 const app = express();
 app.use(express.json({ limit: "50mb" }));
@@ -15,26 +16,14 @@ const REDIS_URL = process.env.REDIS_URL;
 
 const connection = new IORedis(REDIS_URL, { maxRetriesPerRequest: null });
 const videoQueue = new Queue("video-processing", { connection });
-
-// Limpeza de segurança (se ainda houver vídeos travados antigos, isso vai limpar ao reiniciar)
 videoQueue.obliterate({ force: true }).catch(() => {});
 
-// Função para rodar o FFmpeg de forma silenciosa e limpa
 function runFfmpeg(args, stepName = "Processando") {
   return new Promise((resolve, reject) => {
-    // Adicionamos -loglevel error para ele não cuspir lixo técnico
-    // Adicionamos -nostdin para ele não travar esperando teclado
     const finalArgs = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", ...args];
-    
     console.log(`⏳ [FFMPEG] Iniciando: ${stepName}...`);
-    
     const p = spawn("ffmpeg", finalArgs);
-
-    // Capturamos apenas erros reais
-    p.stderr.on("data", (data) => {
-      console.error(`❌ [ERRO FFMPEG]: ${data}`);
-    });
-
+    p.stderr.on("data", (data) => console.error(`❌ [ERRO FFMPEG]: ${data}`));
     p.on("close", (code) => {
       if (code === 0) {
         console.log(`✅ [SUCESSO]: ${stepName} concluído.`);
@@ -77,7 +66,6 @@ app.post("/render", async (req, res) => {
     removeOnFail: { age: 3600 }, 
     attempts: 1 
   });
-
   console.log(`🚀 [FILA] Novo vídeo recebido! ID: ${job_id}`);
   res.json({ status: "queued", job_id });
 });
@@ -95,14 +83,13 @@ const worker = new Worker("video-processing", async (job) => {
     const outputPath = path.join(workDir, "output.mp4");
     const srtPath = path.join(workDir, "subs.srt");
 
-    console.log(`📦 [JOB ${job_id}] PREPARANDO: Baixando áudio...`);
+    console.log(`📦 [JOB ${job_id}] Baixando áudio...`);
     await downloadToFile(audio_url, audioPath);
     const duration = await getMediaDuration(audioPath);
 
     const broll_urls = job.data.broll_urls || [];
     const downloadedClips = [];
 
-    console.log(`🎥 [JOB ${job_id}] ETAPA 1: Baixando ${broll_urls.length} vídeos de fundo...`);
     for (let i = 0; i < broll_urls.length; i++) {
       const p = path.join(workDir, `raw_${i}.mp4`);
       await downloadToFile(broll_urls[i], p);
@@ -112,17 +99,15 @@ const worker = new Worker("video-processing", async (job) => {
     const vf = `fps=30,scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},eq=contrast=1.05:saturation=1.3,unsharp=5:5:0.8:5:5:0.0,format=yuv420p`;
     const normalizedClips = [];
 
-    console.log(`⚙️ [JOB ${job_id}] ETAPA 2: Aplicando Nitidez e Cores nos clipes...`);
     for (let i = 0; i < downloadedClips.length; i++) {
       const normPath = path.join(workDir, `slice_${i}.mp4`);
-      await runFfmpeg(["-ss", "0", "-t", "5", "-i", downloadedClips[i], "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-an", normPath], `Corte do Clipe ${i+1}/${downloadedClips.length}`);
+      await runFfmpeg(["-ss", "0", "-t", "5", "-i", downloadedClips[i], "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-an", normPath], `Corte Clipe ${i+1}`);
       normalizedClips.push(normPath);
     }
 
     const playlistPath = path.join(workDir, "playlist.txt");
     fs.writeFileSync(playlistPath, normalizedClips.map(p => `file '${p}'`).join("\n"));
 
-    // Lógica das Legendas Restaurada
     let activeSubtitlePath = null;
     const subtitle_url = job.data.subtitle_url || output_config.subtitle_url;
     const subtitle_text = job.data.subtitle_text || output_config.subtitle_text;
@@ -135,10 +120,8 @@ const worker = new Worker("video-processing", async (job) => {
       activeSubtitlePath = srtPath;
     }
 
-    console.log(`🎬 [JOB ${job_id}] ETAPA 3: Montagem Final (Vídeo + Áudio + Estilo)...`);
     const finalArgs = ["-f", "concat", "-safe", "0", "-i", playlistPath, "-i", audioPath];
     
-    // Lógica da Logo Restaurada
     if (logo_url) {
       await downloadToFile(logo_url, path.join(workDir, "logo.png"));
       finalArgs.push("-i", path.join(workDir, "logo.png"));
@@ -165,10 +148,51 @@ const worker = new Worker("video-processing", async (job) => {
 
     await runFfmpeg(finalArgs, "Renderização Final");
 
-    const serverUrl = process.env.RENDER_EXTERNAL_URL || `https://${process.env.RENDER_HOSTNAME}`;
-    const video_url = `${serverUrl}/videos/${job_id}/output.mp4`;
+    // --- A MÁGICA ACONTECE AQUI NO RENDER AGORA ---
+    let finalVideoUrl = "";
+    try {
+      console.log(`🔍 [DRIVE] Buscando token no Supabase...`);
+      const SUPABASE_URL = process.env.SUPABASE_URL;
+      const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+      
+      const { data: configData } = await axios.get(`${SUPABASE_URL}/rest/v1/app_config?key=eq.google_drive_refresh_token&select=value`, {
+        headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+      });
+      
+      const refreshToken = configData[0]?.value;
+      if (!refreshToken) throw new Error("Token não encontrado no banco.");
 
-    await axios.post(webhook_url, { job_id, status: "completed", video_url }, { headers: { "x-webhook-secret": webhook_secret } });
+      const clientId = process.env.GOOGLE_CLIENT_ID;
+      const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+      const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
+
+      console.log(`☁️ [DRIVE] Autenticando e fazendo upload pesado...`);
+      const oauth2Client = new google.auth.OAuth2(clientId, clientSecret);
+      oauth2Client.setCredentials({ refresh_token: refreshToken });
+      const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
+      const response = await drive.files.create({
+        requestBody: { name: `video_${job_id}.mp4`, parents: [folderId] },
+        media: { mimeType: 'video/mp4', body: fs.createReadStream(outputPath) },
+        fields: 'id, webViewLink'
+      });
+
+      await drive.permissions.create({
+        fileId: response.data.id,
+        requestBody: { role: 'reader', type: 'anyone' }
+      });
+
+      finalVideoUrl = response.data.webViewLink;
+      console.log(`✅ [DRIVE] Link permanente gerado: ${finalVideoUrl}`);
+
+    } catch (err) {
+      console.error("❌ Erro ao subir no Drive. Usando link temporário.", err.message);
+      const serverUrl = process.env.RENDER_EXTERNAL_URL || `https://${process.env.RENDER_HOSTNAME}`;
+      finalVideoUrl = `${serverUrl}/videos/${job_id}/output.mp4`;
+    }
+
+    // O Render chama o Webhook informando o link que ele gerou!
+    await axios.post(webhook_url, { job_id, status: "completed", video_url: finalVideoUrl }, { headers: { "x-webhook-secret": webhook_secret } });
     console.log(`✨ [JOB ${job_id}] FINALIZADO COM SUCESSO!`);
 
   } catch (e) {
