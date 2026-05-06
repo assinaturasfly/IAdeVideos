@@ -5,7 +5,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { Queue, Worker } = require("bullmq");
 const IORedis = require("ioredis");
-const { google } = require("googleapis"); // Biblioteca do Google
+const { google } = require("googleapis"); //Biblioteca do Google
 
 const app = express();
 app.use(express.json({ limit: "50mb" }));
