@@ -120,7 +120,7 @@ const worker = new Worker("video-processing", async (job) => {
       activeSubtitlePath = srtPath;
     }
 
-    const finalArgs = ["-f", "concat", "-safe", "0", "-i", playlistPath, "-i", audioPath];
+    const finalArgs = ["-stream_loop", "-1", "-f", "concat", "-safe", "0", "-i", playlistPath, "-i", audioPath];
     
     if (logo_url) {
       await downloadToFile(logo_url, path.join(workDir, "logo.png"));
