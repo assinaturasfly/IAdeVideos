@@ -104,8 +104,9 @@ const worker = new Worker("video-processing", async (job) => {
 
     // 👇 A MÁGICA DOS 65% DO VÍDEO ACONTECE AQUI 👇
     const liftVideo = job.data.video_layout === 'split_overlap';
-    const videoHeight = liftVideo ? Math.round(height * 0.65) : height;
-
+    const ratio = job.data.video_height_ratio || 0.65; 
+    const videoHeight = liftVideo ? Math.round(height * ratio) : height;
+    
     const vf = `fps=30,scale=${width}:${videoHeight}:force_original_aspect_ratio=increase,crop=${width}:${videoHeight},eq=contrast=1.05:saturation=1.3,unsharp=5:5:0.8:5:5:0.0,format=yuv420p`;
     const normalizedClips = [];
 
