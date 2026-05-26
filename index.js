@@ -102,7 +102,7 @@ const worker = new Worker("video-processing", async (job) => {
       downloadedClips.push(p);
     }
 
-    // 👇 SEPARAÇÃO DOS 65% SUPERIORES DO VÍDEO 👇
+    // Configura a altura do vídeo proporcionalmente (65% do total)
     const liftVideo = job.data.logo_always_on === true && job.data.logo_width_type === 'full';
     const videoHeight = liftVideo ? Math.round(height * 0.65) : height;
 
@@ -152,25 +152,25 @@ const worker = new Worker("video-processing", async (job) => {
     const logoX = isFullWidth ? 0 : (job.data.logo_x !== undefined ? job.data.logo_x : '(W-w)/2');
     const logoY = isFullWidth ? 'H-h' : (job.data.logo_y !== undefined ? job.data.logo_y : (job.data.logo_position === 'bottom' ? 'H-h-40' : '40'));
 
-    // 👇 RENDERIZAÇÃO COMPLEXA DA TELA DIVIDIDA 👇
-    if (activeSubtitlePath && logo_url) {
-      const filterComplex = liftVideo 
-        ? `[0:v]pad=${width}:${height}:0:0:black[padded];[padded]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=${logoWidth}:-1[logo];[subbed][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`
-        : `[0:v]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=${logoWidth}:-1[logo];[subbed][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
-      finalArgs.push("-filter_complex", filterComplex);
-      videoMap = "[v]";
-    } else if (activeSubtitlePath && !logo_url) {
-      if (liftVideo) {
-        const filterComplex = `[0:v]pad=${width}:${height}:0:0:black[padded];[padded]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[v]`;
-        finalArgs.push("-filter_complex", filterComplex);
-        videoMap = "[v]";
-      } else {
-        finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${forceStyle}'`);
-      }
-    } else if (!activeSubtitlePath && logo_url) {
-      const filterComplex = liftVideo
-        ? `[0:v]pad=${width}:${height}:0:0:black[padded];[2:v]scale=${logoWidth}:-1[logo];[padded][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`
-        : `[2:v]scale=${logoWidth}:-1[logo];[0:v][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
+    // 👇 MATRIZ DE RENDERIZAÇÃO INTELIGENTE BLINDADA 👇
+    let filterComplex = "";
+    if (liftVideo && activeSubtitlePath && logo_url) {
+      filterComplex = `[0:v]pad=${width}:${height}:0:0:black[padded];[padded]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=${logoWidth}:-1[logo];[subbed][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
+    } else if (liftVideo && activeSubtitlePath && !logo_url) {
+      filterComplex = `[0:v]pad=${width}:${height}:0:0:black[padded];[padded]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[v]`;
+    } else if (liftVideo && !activeSubtitlePath && logo_url) {
+      filterComplex = `[0:v]pad=${width}:${height}:0:0:black[padded];[2:v]scale=${logoWidth}:-1[logo];[padded][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
+    } else if (liftVideo && !activeSubtitlePath && !logo_url) {
+      filterComplex = `[0:v]pad=${width}:${height}:0:0:black[v]`;
+    } else if (!liftVideo && activeSubtitlePath && logo_url) {
+      filterComplex = `[0:v]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=${logoWidth}:-1[logo];[subbed][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
+    } else if (!liftVideo && activeSubtitlePath && !logo_url) {
+      filterComplex = `[0:v]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[v]`;
+    } else if (!liftVideo && !activeSubtitlePath && logo_url) {
+      filterComplex = `[2:v]scale=${logoWidth}:-1[logo];[0:v][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
+    }
+
+    if (filterComplex) {
       finalArgs.push("-filter_complex", filterComplex);
       videoMap = "[v]";
     }
