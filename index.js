@@ -137,13 +137,14 @@ const worker = new Worker("video-processing", async (job) => {
     const forceStyle = `Alignment=2,MarginV=90,Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
     const totalVideoLength = (duration > 0) ? duration : (normalizedClips.length * 5);
     
-    // 👇 DINÂMICO E SEGURO: LÊ OS DADOS ENVIADOS PELO CLAUDE 👇
+    // 👇 ADAPTAÇÃO AUTOMÁTICA RESPONSIVA 👇
     const isAlwaysOn = job.data.logo_always_on === true;
     const showLogoFrom = isAlwaysOn ? 0 : Math.max(0, totalVideoLength - 3);
     
-    const logoWidth = job.data.logo_width || 350;
-    const logoX = job.data.logo_x !== undefined ? job.data.logo_x : '(W-w)/2';
-    const logoY = job.data.logo_y !== undefined ? job.data.logo_y : (job.data.logo_position === 'bottom' ? 'H-h-40' : '40');
+    const isFullWidth = job.data.logo_width_type === 'full' || job.data.logo_width === 1080;
+    const logoWidth = isFullWidth ? width : (job.data.logo_width || 350);
+    const logoX = isFullWidth ? 0 : (job.data.logo_x !== undefined ? job.data.logo_x : '(W-w)/2');
+    const logoY = isFullWidth ? 'H-h' : (job.data.logo_y !== undefined ? job.data.logo_y : (job.data.logo_position === 'bottom' ? 'H-h-40' : '40'));
 
     if (activeSubtitlePath && logo_url) {
       const filterComplex = `[0:v]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=${logoWidth}:-1[logo];[subbed][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
@@ -161,7 +162,6 @@ const worker = new Worker("video-processing", async (job) => {
 
     await runFfmpeg(finalArgs, "Renderização Final");
 
-    // --- A MÁGICA ACONTECE AQUI NO RENDER ---
     let finalVideoUrl = "";
     try {
       console.log(`🔍 [DRIVE] Buscando token no Supabase...`);
@@ -204,7 +204,6 @@ const worker = new Worker("video-processing", async (job) => {
       finalVideoUrl = `${serverUrl}/videos/${job_id}/output.mp4`;
     }
 
-    // O Render chama o Webhook informando o link que ele gerou!
     await axios.post(webhook_url, { job_id, status: "completed", video_url: finalVideoUrl }, { headers: { "x-webhook-secret": webhook_secret } });
     console.log(`✨ [JOB ${job_id}] FINALIZADO COM SUCESSO!`);
 
