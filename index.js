@@ -9,6 +9,13 @@ const IORedis = require("ioredis");
 const { google } = require("googleapis"); //Biblioteca do Google
 
 const app = express();
+
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
+}));
+
 app.use(express.json({ limit: "50mb" }));
 app.use("/videos", express.static("/tmp/video-worker"));
 
