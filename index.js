@@ -102,7 +102,11 @@ const worker = new Worker("video-processing", async (job) => {
       downloadedClips.push(p);
     }
 
-    const vf = `fps=30,scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},eq=contrast=1.05:saturation=1.3,unsharp=5:5:0.8:5:5:0.0,format=yuv420p`;
+    // 👇 SEPARAÇÃO DOS 65% SUPERIORES DO VÍDEO 👇
+    const liftVideo = job.data.logo_always_on === true && job.data.logo_width_type === 'full';
+    const videoHeight = liftVideo ? Math.round(height * 0.65) : height;
+
+    const vf = `fps=30,scale=${width}:${videoHeight}:force_original_aspect_ratio=increase,crop=${width}:${videoHeight},eq=contrast=1.05:saturation=1.3,unsharp=5:5:0.8:5:5:0.0,format=yuv420p`;
     const normalizedClips = [];
 
     for (let i = 0; i < downloadedClips.length; i++) {
@@ -135,7 +139,6 @@ const worker = new Worker("video-processing", async (job) => {
 
     let videoMap = "0:v:0";
     
-    // 👇 MARGEM DA LEGENDA DINÂMICA (EVITA QUEBRAR A OUTRA APP) 👇
     const marginV = job.data.subtitle_margin_v !== undefined ? job.data.subtitle_margin_v : 90;
     const forceStyle = `Alignment=2,MarginV=${marginV},Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
     
@@ -149,14 +152,25 @@ const worker = new Worker("video-processing", async (job) => {
     const logoX = isFullWidth ? 0 : (job.data.logo_x !== undefined ? job.data.logo_x : '(W-w)/2');
     const logoY = isFullWidth ? 'H-h' : (job.data.logo_y !== undefined ? job.data.logo_y : (job.data.logo_position === 'bottom' ? 'H-h-40' : '40'));
 
+    // 👇 RENDERIZAÇÃO COMPLEXA DA TELA DIVIDIDA 👇
     if (activeSubtitlePath && logo_url) {
-      const filterComplex = `[0:v]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=${logoWidth}:-1[logo];[subbed][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
+      const filterComplex = liftVideo 
+        ? `[0:v]pad=${width}:${height}:0:0:black[padded];[padded]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=${logoWidth}:-1[logo];[subbed][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`
+        : `[0:v]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=${logoWidth}:-1[logo];[subbed][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
       finalArgs.push("-filter_complex", filterComplex);
       videoMap = "[v]";
     } else if (activeSubtitlePath && !logo_url) {
-      finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${forceStyle}'`);
+      if (liftVideo) {
+        const filterComplex = `[0:v]pad=${width}:${height}:0:0:black[padded];[padded]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[v]`;
+        finalArgs.push("-filter_complex", filterComplex);
+        videoMap = "[v]";
+      } else {
+        finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${forceStyle}'`);
+      }
     } else if (!activeSubtitlePath && logo_url) {
-      const filterComplex = `[2:v]scale=${logoWidth}:-1[logo];[0:v][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
+      const filterComplex = liftVideo
+        ? `[0:v]pad=${width}:${height}:0:0:black[padded];[2:v]scale=${logoWidth}:-1[logo];[padded][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`
+        : `[2:v]scale=${logoWidth}:-1[logo];[0:v][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
       finalArgs.push("-filter_complex", filterComplex);
       videoMap = "[v]";
     }
