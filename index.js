@@ -6,16 +6,14 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { Queue, Worker } = require("bullmq");
 const IORedis = require("ioredis");
-const { google } = require("googleapis"); //Biblioteca do Google
+const { google } = require("googleapis");
 
 const app = express();
-
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 }));
-
 app.use(express.json({ limit: "50mb" }));
 app.use("/videos", express.static("/tmp/video-worker"));
 
@@ -138,10 +136,11 @@ const worker = new Worker("video-processing", async (job) => {
     let videoMap = "0:v:0";
     const forceStyle = `Alignment=2,MarginV=90,Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
     const totalVideoLength = (duration > 0) ? duration : (normalizedClips.length * 5);
-
+    
+    // 👇 NOSSA NOVA LÓGICA 👇
     const isAlwaysOn = job.data.logo_always_on === true;
     const showLogoFrom = isAlwaysOn ? 0 : Math.max(0, totalVideoLength - 3);
-    const logoY = job.data.logo_position === 'bottom' ? 'H-h-40' : '40'; // H=altura vídeo, h=altura imagem, 40=margem
+    const logoY = job.data.logo_position === 'bottom' ? 'H-h-40' : '40';
 
     if (activeSubtitlePath && logo_url) {
       const filterComplex = `[0:v]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=350:-1[logo];[subbed][logo]overlay=(W-w)/2:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
@@ -153,6 +152,7 @@ const worker = new Worker("video-processing", async (job) => {
       const filterComplex = `[2:v]scale=350:-1[logo];[0:v][logo]overlay=(W-w)/2:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
       finalArgs.push("-filter_complex", filterComplex);
       videoMap = "[v]";
+    }
 
     finalArgs.push("-map", videoMap, "-map", "1:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p", "-shortest", outputPath);
 
