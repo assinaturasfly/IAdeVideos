@@ -102,8 +102,8 @@ const worker = new Worker("video-processing", async (job) => {
       downloadedClips.push(p);
     }
 
-    // Configura a altura do vídeo proporcionalmente (65% do total)
-    const liftVideo = job.data.logo_always_on === true && job.data.logo_width_type === 'full';
+    // 👇 A MÁGICA DOS 65% DO VÍDEO ACONTECE AQUI 👇
+    const liftVideo = job.data.video_layout === 'split_overlap';
     const videoHeight = liftVideo ? Math.round(height * 0.65) : height;
 
     const vf = `fps=30,scale=${width}:${videoHeight}:force_original_aspect_ratio=increase,crop=${width}:${videoHeight},eq=contrast=1.05:saturation=1.3,unsharp=5:5:0.8:5:5:0.0,format=yuv420p`;
@@ -139,7 +139,6 @@ const worker = new Worker("video-processing", async (job) => {
 
     let videoMap = "0:v:0";
     
-    // 👇 ADAPTAÇÃO AUTOMÁTICA RESPONSIVA 👇
     const marginV = job.data.subtitle_margin_v !== undefined ? job.data.subtitle_margin_v : 90;
     const forceStyle = `Alignment=2,MarginV=${marginV},Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
     
@@ -152,27 +151,29 @@ const worker = new Worker("video-processing", async (job) => {
     const logoX = isFullWidth ? 0 : (job.data.logo_x !== undefined ? job.data.logo_x : '(W-w)/2');
     const logoY = isFullWidth ? 'H-h' : (job.data.logo_y !== undefined ? job.data.logo_y : (job.data.logo_position === 'bottom' ? 'H-h-40' : '40'));
 
-    // 👇 RENDERIZAÇÃO COMPLEXA DA TELA DIVIDIDA 👇
-    if (activeSubtitlePath && logo_url) {
-      const filterComplex = liftVideo 
-        ? `[0:v]pad=${width}:${height}:0:0:black[padded];[padded]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=${logoWidth}:-1[logo];[subbed][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`
-        : `[0:v]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=${logoWidth}:-1[logo];[subbed][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
-      finalArgs.push("-filter_complex", filterComplex);
-      videoMap = "[v]";
-    } else if (activeSubtitlePath && !logo_url) {
-      if (liftVideo) {
-        const filterComplex = `[0:v]pad=${width}:${height}:0:0:black[padded];[padded]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[v]`;
-        finalArgs.push("-filter_complex", filterComplex);
-        videoMap = "[v]";
-      } else {
-        finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${forceStyle}'`);
-      }
-    } else if (!activeSubtitlePath && logo_url) {
-      const filterComplex = liftVideo
-        ? `[0:v]pad=${width}:${height}:0:0:black[padded];[2:v]scale=${logoWidth}:-1[logo];[padded][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`
-        : `[2:v]scale=${logoWidth}:-1[logo];[0:v][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
-      finalArgs.push("-filter_complex", filterComplex);
-      videoMap = "[v]";
+    // 👇 MONTAGEM DINÂMICA DA TELA PRETA + LEGENDA + CARD 👇
+    let filterParts = [];
+    let currentV = "0:v:0";
+
+    if (liftVideo) {
+      filterParts.push(`[${currentV}]pad=${width}:${height}:0:0:black[v1]`);
+      currentV = "v1";
+    }
+
+    if (activeSubtitlePath) {
+      filterParts.push(`[${currentV}]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[v2]`);
+      currentV = "v2";
+    }
+
+    if (logo_url) {
+      filterParts.push(`[2:v]scale=${logoWidth}:-1[logo]`);
+      filterParts.push(`[${currentV}][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v3]`);
+      currentV = "v3";
+    }
+
+    if (currentV !== "0:v:0") {
+      finalArgs.push("-filter_complex", filterParts.join(';'));
+      videoMap = `[${currentV}]`;
     }
 
     finalArgs.push("-map", videoMap, "-map", "1:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p", "-shortest", outputPath);
@@ -196,7 +197,7 @@ const worker = new Worker("video-processing", async (job) => {
       const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
       const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
 
-      console.log(`☁️ [DRIVE] Autenticando e fazendo upload pesado...`);
+      console.log(`☁️ [DRIVE] Autenticando e fazendo upload...`);
       const oauth2Client = new google.auth.OAuth2(clientId, clientSecret);
       oauth2Client.setCredentials({ refresh_token: refreshToken });
       const drive = google.drive({ version: 'v3', auth: oauth2Client });
@@ -216,7 +217,7 @@ const worker = new Worker("video-processing", async (job) => {
       console.log(`✅ [DRIVE] Link permanente gerado: ${finalVideoUrl}`);
 
     } catch (err) {
-      console.error("❌ Erro ao subir no Drive. Usando link temporário.", err.message);
+      console.error("❌ Erro ao subir no Drive.", err.message);
       const serverUrl = process.env.RENDER_EXTERNAL_URL || `https://${process.env.RENDER_HOSTNAME}`;
       finalVideoUrl = `${serverUrl}/videos/${job_id}/output.mp4`;
     }
