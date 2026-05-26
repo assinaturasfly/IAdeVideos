@@ -134,10 +134,13 @@ const worker = new Worker("video-processing", async (job) => {
     }
 
     let videoMap = "0:v:0";
-    const forceStyle = `Alignment=2,MarginV=90,Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
+    
+    // 👇 MARGEM DA LEGENDA DINÂMICA (EVITA QUEBRAR A OUTRA APP) 👇
+    const marginV = job.data.subtitle_margin_v !== undefined ? job.data.subtitle_margin_v : 90;
+    const forceStyle = `Alignment=2,MarginV=${marginV},Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
+    
     const totalVideoLength = (duration > 0) ? duration : (normalizedClips.length * 5);
     
-    // 👇 ADAPTAÇÃO AUTOMÁTICA RESPONSIVA 👇
     const isAlwaysOn = job.data.logo_always_on === true;
     const showLogoFrom = isAlwaysOn ? 0 : Math.max(0, totalVideoLength - 3);
     
