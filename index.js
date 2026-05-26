@@ -139,11 +139,11 @@ const worker = new Worker("video-processing", async (job) => {
 
     let videoMap = "0:v:0";
     
+    // 👇 ADAPTAÇÃO AUTOMÁTICA RESPONSIVA 👇
     const marginV = job.data.subtitle_margin_v !== undefined ? job.data.subtitle_margin_v : 90;
     const forceStyle = `Alignment=2,MarginV=${marginV},Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
     
-    const totalVideoLength = (duration > 0) ? duration : (normalizedClips.length * 5);
-    
+    const totalVideoLength = duration > 0 ? duration : normalizedClips.length * 5;
     const isAlwaysOn = job.data.logo_always_on === true;
     const showLogoFrom = isAlwaysOn ? 0 : Math.max(0, totalVideoLength - 3);
     
@@ -152,25 +152,25 @@ const worker = new Worker("video-processing", async (job) => {
     const logoX = isFullWidth ? 0 : (job.data.logo_x !== undefined ? job.data.logo_x : '(W-w)/2');
     const logoY = isFullWidth ? 'H-h' : (job.data.logo_y !== undefined ? job.data.logo_y : (job.data.logo_position === 'bottom' ? 'H-h-40' : '40'));
 
-    // 👇 MATRIZ DE RENDERIZAÇÃO INTELIGENTE BLINDADA 👇
-    let filterComplex = "";
-    if (liftVideo && activeSubtitlePath && logo_url) {
-      filterComplex = `[0:v]pad=${width}:${height}:0:0:black[padded];[padded]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=${logoWidth}:-1[logo];[subbed][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
-    } else if (liftVideo && activeSubtitlePath && !logo_url) {
-      filterComplex = `[0:v]pad=${width}:${height}:0:0:black[padded];[padded]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[v]`;
-    } else if (liftVideo && !activeSubtitlePath && logo_url) {
-      filterComplex = `[0:v]pad=${width}:${height}:0:0:black[padded];[2:v]scale=${logoWidth}:-1[logo];[padded][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
-    } else if (liftVideo && !activeSubtitlePath && !logo_url) {
-      filterComplex = `[0:v]pad=${width}:${height}:0:0:black[v]`;
-    } else if (!liftVideo && activeSubtitlePath && logo_url) {
-      filterComplex = `[0:v]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=${logoWidth}:-1[logo];[subbed][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
-    } else if (!liftVideo && activeSubtitlePath && !logo_url) {
-      filterComplex = `[0:v]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[v]`;
-    } else if (!liftVideo && !activeSubtitlePath && logo_url) {
-      filterComplex = `[2:v]scale=${logoWidth}:-1[logo];[0:v][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
-    }
-
-    if (filterComplex) {
+    // 👇 RENDERIZAÇÃO COMPLEXA DA TELA DIVIDIDA 👇
+    if (activeSubtitlePath && logo_url) {
+      const filterComplex = liftVideo 
+        ? `[0:v]pad=${width}:${height}:0:0:black[padded];[padded]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=${logoWidth}:-1[logo];[subbed][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`
+        : `[0:v]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[subbed];[2:v]scale=${logoWidth}:-1[logo];[subbed][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
+      finalArgs.push("-filter_complex", filterComplex);
+      videoMap = "[v]";
+    } else if (activeSubtitlePath && !logo_url) {
+      if (liftVideo) {
+        const filterComplex = `[0:v]pad=${width}:${height}:0:0:black[padded];[padded]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[v]`;
+        finalArgs.push("-filter_complex", filterComplex);
+        videoMap = "[v]";
+      } else {
+        finalArgs.push("-vf", `subtitles=${activeSubtitlePath}:force_style='${forceStyle}'`);
+      }
+    } else if (!activeSubtitlePath && logo_url) {
+      const filterComplex = liftVideo
+        ? `[0:v]pad=${width}:${height}:0:0:black[padded];[2:v]scale=${logoWidth}:-1[logo];[padded][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`
+        : `[2:v]scale=${logoWidth}:-1[logo];[0:v][logo]overlay=${logoX}:${logoY}:enable='gte(t,${showLogoFrom})'[v]`;
       finalArgs.push("-filter_complex", filterComplex);
       videoMap = "[v]";
     }
