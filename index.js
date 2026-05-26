@@ -102,7 +102,7 @@ const worker = new Worker("video-processing", async (job) => {
       downloadedClips.push(p);
     }
 
-    // 👇 A MÁGICA DOS 65% DO VÍDEO ACONTECE AQUI 👇
+    // 👇 DIMENSÃO DINÂMICA DO VÍDEO COMPATÍVEL COM O CARD 👇
     const liftVideo = job.data.video_layout === 'split_overlap';
     const ratio = job.data.video_height_ratio || 0.65; 
     const videoHeight = liftVideo ? Math.round(height * ratio) : height;
@@ -140,7 +140,19 @@ const worker = new Worker("video-processing", async (job) => {
 
     let videoMap = "0:v:0";
     
-    const marginV = job.data.subtitle_margin_v !== undefined ? job.data.subtitle_margin_v : 90;
+    // 👇 CÁLCULO DINÂMICO AUTOMÁTICO DA ALTURA DA LEGENDA (VIRAL VS DESTINO) 👇
+    let marginV = job.data.subtitle_margin_v;
+    if (marginV === undefined) {
+      const cardMode = job.data.card_mode || 'viral';
+      if (cardMode === 'destino') {
+        // Reels Destino: Legenda centralizada na metade da tela (~49% de altura)
+        marginV = Math.round(height * 0.49);
+      } else {
+        // Reels Viral: Legenda logo acima da quina do card de 45% (~48% de altura)
+        marginV = Math.round(height * 0.48);
+      }
+    }
+    
     const forceStyle = `Alignment=2,MarginV=${marginV},Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
     
     const totalVideoLength = duration > 0 ? duration : normalizedClips.length * 5;
@@ -152,7 +164,6 @@ const worker = new Worker("video-processing", async (job) => {
     const logoX = isFullWidth ? 0 : (job.data.logo_x !== undefined ? job.data.logo_x : '(W-w)/2');
     const logoY = isFullWidth ? 'H-h' : (job.data.logo_y !== undefined ? job.data.logo_y : (job.data.logo_position === 'bottom' ? 'H-h-40' : '40'));
 
-    // 👇 MONTAGEM DINÂMICA DA TELA PRETA + LEGENDA + CARD 👇
     let filterParts = [];
     let currentV = "0:v:0";
 
