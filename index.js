@@ -142,16 +142,18 @@ const worker = new Worker("video-processing", async (job) => {
 
     // 👇 2. CÁLCULO DA LEGENDA (SUBTITLE MARGIN) 👇
     // Margem calculada de baixo para cima: Destino fica em 45% (acima do card), Viral fica padrão (90px)
-    let marginV = job.data.subtitle_margin_v;
+   let marginV = job.data.subtitle_margin_v;
     if (marginV === undefined) {
       marginV = isDestino ? Math.round(height * 0.45) : 90;
     }
     
-    const forceStyle = `Alignment=2,MarginV=${marginV},Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
+    // --- INÍCIO DO DEBUG NEON ---
+    // Forçamos MarginV pro meio da tela, fonte Arial (que tem no Linux) e cor Verde Neon (&H00FF00&)
+    const forceStyle = `Alignment=2,MarginV=${Math.round(height / 2)},Fontname=Arial,Bold=1,Fontsize=14,BorderStyle=1,Outline=2,PrimaryColour=&H0000FF00&`;
     
-    const totalVideoLength = duration > 0 ? duration : normalizedClips.length * 5;
-    const isAlwaysOn = job.data.logo_always_on === true;
-    const showLogoFrom = isAlwaysOn ? 0 : Math.max(0, totalVideoLength - 3);
+    console.log(`🐛 [DEBUG] Legenda ativa? ${activeSubtitlePath !== null}`);
+    console.log(`🐛 [DEBUG] Caminho SRT: ${activeSubtitlePath}`);
+    // --- FIM DO DEBUG NEON ---
 
     // 👇 3. ORDEM DAS CAMADAS (Z-INDEX PERFEITO) 👇
     let filterParts = [];
