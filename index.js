@@ -169,10 +169,17 @@ const worker = new Worker("video-processing", async (job) => {
       currentV = "v_padded";
     }
 
-    // Passo C: Colocar o Card/Design por cima de tudo no rodapé (H-h)
+    // Passo C: Colar o Card (Destino) ou a Logo (Viral)
     if (logo_url) {
-      filterParts.push(`[2:v]scale=${width}:-1[logo]`);
-      filterParts.push(`[${currentV}][logo]overlay=0:H-h:enable='gte(t,${showLogoFrom})'[v_final]`);
+      if (isDestino) {
+        // 👇 Reels Destino: Card grande esticado ocupando a largura total no rodapé
+        filterParts.push(`[2:v]scale=${width}:-1[logo]`);
+        filterParts.push(`[${currentV}][logo]overlay=0:H-h:enable='gte(t,${showLogoFrom})'[v_final]`);
+      } else {
+        // 👇 Reels Viral: Logo menor (350px) centralizado no TOPO (Y = 40) como era antes
+        filterParts.push(`[2:v]scale=350:-1[logo]`);
+        filterParts.push(`[${currentV}][logo]overlay=(W-w)/2:40:enable='gte(t,${showLogoFrom})'[v_final]`);
+      }
       currentV = "v_final";
     }
 
