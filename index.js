@@ -150,7 +150,7 @@ const worker = new Worker("video-processing", async (job) => {
     if (activeSubtitlePath) {
       // Se for Destino, o vídeo tem 832px de altura. Uma margem de 140px coloca a legenda perfeitamente
       // logo acima da linha onde o card roxo/preto vai começar a cobrir.
-      const dynamicMargin = isDestino ? 140 : 90;
+      const dynamicMargin = isDestino ? 40 : 90;
       const forceStyle = `Alignment=2,MarginV=${dynamicMargin},Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
       
       filterParts.push(`[${currentV}]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[v_subbed]`);
