@@ -150,7 +150,7 @@ const worker = new Worker("video-processing", async (job) => {
     // Passo A: Queimar a Legenda PRIMEIRO (Evita o bug de sumir após o overlay)
     if (activeSubtitlePath) {
       // Separa as margens: 40 para Destino, 90 para Viral
-      const dynamicMargin = isDestino ? 90 : 90;
+      const dynamicMargin = isDestino ? 55 : 90;
       
       // 👇 AGORA O TAMANHO TAMBÉM É DINÂMICO:
       // Se for Destino usa tamanho 12, se for Viral volta para o tamanho original 8
