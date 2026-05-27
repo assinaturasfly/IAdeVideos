@@ -141,8 +141,7 @@ const worker = new Worker("video-processing", async (job) => {
     }
 
     // 👇 2. CÁLCULO DA LEGENDA (SUBTITLE MARGIN) 👇
-    // Margem calculada de baixo para cima: Destino fica em 45% (acima do card), Viral fica padrão (90px)
-   let marginV = job.data.subtitle_margin_v;
+    let marginV = job.data.subtitle_margin_v;
     if (marginV === undefined) {
       marginV = isDestino ? Math.round(height * 0.45) : 90;
     }
@@ -154,6 +153,11 @@ const worker = new Worker("video-processing", async (job) => {
     console.log(`🐛 [DEBUG] Legenda ativa? ${activeSubtitlePath !== null}`);
     console.log(`🐛 [DEBUG] Caminho SRT: ${activeSubtitlePath}`);
     // --- FIM DO DEBUG NEON ---
+
+    // 👇 RECUPERANDO AS VARIÁVEIS DO LOGO (Cálculo necessário para o Passo B) 👇
+    const totalVideoLength = duration > 0 ? duration : normalizedClips.length * 5;
+    const isAlwaysOn = job.data.logo_always_on === true;
+    const showLogoFrom = isAlwaysOn ? 0 : Math.max(0, totalVideoLength - 3);
 
     // 👇 3. ORDEM DAS CAMADAS (Z-INDEX PERFEITO) 👇
     let filterParts = [];
