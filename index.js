@@ -103,10 +103,7 @@ const worker = new Worker("video-processing", async (job) => {
     }
 
     // 👇 1. IDENTIFICA O TIPO DE VÍDEO E A ALTURA 👇
-    // Verifica se o frontend avisou que é 'destino'
     const isDestino = job.data.tipo_video === 'destino' || job.data.card_mode === 'destino';
-    
-    // Se for Destino, corta o vídeo em 65% da altura. Se for Viral, 100%.
     const videoHeight = isDestino ? Math.round(height * 0.65) : height;
     
     const vf = `fps=30,scale=${width}:${videoHeight}:force_original_aspect_ratio=increase,crop=${width}:${videoHeight},eq=contrast=1.05:saturation=1.3,unsharp=5:5:0.8:5:5:0.0,format=yuv420p`;
@@ -140,47 +137,37 @@ const worker = new Worker("video-processing", async (job) => {
       finalArgs.push("-i", path.join(workDir, "logo.png"));
     }
 
-    // 👇 2. CÁLCULO DA LEGENDA (SUBTITLE MARGIN) 👇
-    let marginV = job.data.subtitle_margin_v;
-    if (marginV === undefined) {
-      marginV = isDestino ? Math.round(height * 0.45) : 90;
-    }
-    
-    // --- INÍCIO DO DEBUG NEON ---
-    // Forçamos MarginV pro meio da tela, fonte Arial (que tem no Linux) e cor Verde Neon (&H00FF00&)
-    const forceStyle = `Alignment=2,MarginV=${Math.round(height / 2)},Fontname=Arial,Bold=1,Fontsize=14,BorderStyle=1,Outline=2,PrimaryColour=&H0000FF00&`;
-    
-    console.log(`🐛 [DEBUG] Legenda ativa? ${activeSubtitlePath !== null}`);
-    console.log(`🐛 [DEBUG] Caminho SRT: ${activeSubtitlePath}`);
-    // --- FIM DO DEBUG NEON ---
-
-    // 👇 RECUPERANDO AS VARIÁVEIS DO LOGO (Cálculo necessário para o Passo B) 👇
+    // Recarrega variáveis do tempo do logo/card
     const totalVideoLength = duration > 0 ? duration : normalizedClips.length * 5;
     const isAlwaysOn = job.data.logo_always_on === true;
     const showLogoFrom = isAlwaysOn ? 0 : Math.max(0, totalVideoLength - 3);
 
-    // 👇 3. ORDEM DAS CAMADAS (Z-INDEX PERFEITO) 👇
+    // 👇 2. ORDEM DAS CAMADAS CORRIGIDA (Z-INDEX PERFEITO) 👇
     let filterParts = [];
-    let currentV = "0:v:0"; // Inicia com a faixa de vídeo normal
+    let currentV = "0:v:0";
 
-    // Passo A: Preencher o fundo preto e empurrar o vídeo pra cima (Somente Destino)
-    if (isDestino) {
-      filterParts.push(`[${currentV}]pad=${width}:${height}:0:0:black[v1]`);
-      currentV = "v1";
+    // Passo A: Queimar a Legenda PRIMEIRO (Evita o bug de sumir após o overlay)
+    if (activeSubtitlePath) {
+      // Se for Destino, o vídeo tem 832px de altura. Uma margem de 140px coloca a legenda perfeitamente
+      // logo acima da linha onde o card roxo/preto vai começar a cobrir.
+      const dynamicMargin = isDestino ? 140 : 90;
+      const forceStyle = `Alignment=2,MarginV=${dynamicMargin},Fontname=Montserrat,Bold=1,Fontsize=8,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
+      
+      filterParts.push(`[${currentV}]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[v_subbed]`);
+      currentV = "v_subbed";
     }
 
-    // Passo B: Colar o Card/Logo da arte 
-    // É o input 2 [2:v] pois o 0 é o vídeo e o 1 é o áudio
+    // Passo B: Aplicar o fundo preto e empurrar o vídeo para o topo (Apenas no Reels Destino)
+    if (isDestino) {
+      filterParts.push(`[${currentV}]pad=${width}:${height}:0:0:black[v_padded]`);
+      currentV = "v_padded";
+    }
+
+    // Passo C: Colocar o Card/Design por cima de tudo no rodapé (H-h)
     if (logo_url) {
       filterParts.push(`[2:v]scale=${width}:-1[logo]`);
-      filterParts.push(`[${currentV}][logo]overlay=0:H-h:enable='gte(t,${showLogoFrom})'[v2]`);
-      currentV = "v2";
-    }
-
-    // Passo C: Colar a Legenda (Sempre por cima de TUDO)
-    if (activeSubtitlePath) {
-      filterParts.push(`[${currentV}]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[v3]`);
-      currentV = "v3";
+      filterParts.push(`[${currentV}][logo]overlay=0:H-h:enable='gte(t,${showLogoFrom})'[v_final]`);
+      currentV = "v_final";
     }
 
     let videoMap = "0:v:0";
