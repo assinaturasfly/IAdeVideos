@@ -147,11 +147,17 @@ const worker = new Worker("video-processing", async (job) => {
     let currentV = "0:v:0";
 
     // Passo A: Queimar a Legenda PRIMEIRO (Evita o bug de sumir após o overlay)
+    // Passo A: Queimar a Legenda PRIMEIRO (Evita o bug de sumir após o overlay)
     if (activeSubtitlePath) {
-      // Se for Destino, o vídeo tem 832px de altura. Uma margem de 140px coloca a legenda perfeitamente
-      // logo acima da linha onde o card roxo/preto vai começar a cobrir.
-      const dynamicMargin = isDestino ? 55 : 90;
-      const forceStyle = `Alignment=2,MarginV=${dynamicMargin},Fontname=Montserrat,Bold=1,Fontsize=14,BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
+      // Separa as margens: 40 para Destino, 90 para Viral
+      const dynamicMargin = isDestino ? 40 : 90;
+      
+      // 👇 AGORA O TAMANHO TAMBÉM É DINÂMICO:
+      // Se for Destino usa tamanho 12, se for Viral volta para o tamanho original 8
+      const dynamicFontSize = isDestino ? 12 : 8; 
+      
+      // Monta o estilo aplicando as duas variáveis personalizadas
+      const forceStyle = `Alignment=2,MarginV=${dynamicMargin},Fontname=Montserrat,Bold=1,Fontsize=${dynamicFontSize},BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
       
       filterParts.push(`[${currentV}]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[v_subbed]`);
       currentV = "v_subbed";
