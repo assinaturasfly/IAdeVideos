@@ -78,6 +78,9 @@ async function getMediaDuration(filePath) {
 }
 
 app.post("/render", async (req, res) => {
+  // 👇 ESPIÃO ADICIONADO AQUI 👇
+  console.log("📥 DADOS RECEBIDOS NA PORTA DE ENTRADA:", JSON.stringify(req.body, null, 2));
+
   const { job_id, broll_urls, audio_url } = req.body;
   if (!job_id || !audio_url) return res.status(400).json({ error: "Dados ausentes" });
 
@@ -165,7 +168,10 @@ const worker = new Worker("video-processing", async (job) => {
       const dynamicFontSize = isDestino ? 12 : 8; 
       const forceStyle = `Alignment=2,MarginV=${dynamicMargin},Fontname=Montserrat,Bold=1,Fontsize=${dynamicFontSize},BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
       
-      filterParts.push(`[${currentV}]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[v_subbed]`);
+      // 👇 PROTEÇÃO PARA AS BARRAS E CIFRÃO ($ / :) QUE ADICIONAMOS ANTES 👇
+      const escapedSrtPath = activeSubtitlePath.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "'\\\\\\''");
+      
+      filterParts.push(`[${currentV}]subtitles='${escapedSrtPath}':force_style='${forceStyle}'[v_subbed]`);
       currentV = "v_subbed";
     }
 
@@ -240,7 +246,6 @@ const worker = new Worker("video-processing", async (job) => {
         fields: 'id, webViewLink'
       }));
 
-      // 👇 ESTRATÉGIA NOVA PARA AS PERMISSÕES: Axios ao resgate! 👇
       console.log(`🔓 [DRIVE] A alterar permissões de partilha com Axios...`);
       await executeWithRetry(() => 
         axios.post(`https://www.googleapis.com/drive/v3/files/${response.data.id}/permissions`, 
