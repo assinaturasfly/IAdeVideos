@@ -197,6 +197,10 @@ const worker = new Worker("video-processing", async (job) => {
 
     await runFfmpeg(finalArgs, "Renderização Final");
 
+    // 👇 O RESPIRO DO SERVIDOR FOI ADICIONADO AQUI 👇
+    console.log("🧘‍♂️ Dando um respiro de 10 segundos para o servidor recuperar a rede...");
+    await new Promise(r => setTimeout(r, 10000));
+
     let finalVideoUrl = "";
     try {
       console.log(`🔍 [DRIVE] Buscando token no Supabase...`);
