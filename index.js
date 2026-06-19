@@ -24,6 +24,20 @@ const connection = new IORedis(REDIS_URL, { maxRetriesPerRequest: null });
 const videoQueue = new Queue("video-processing", { connection });
 videoQueue.obliterate({ force: true }).catch(() => {});
 
+// 👇 NOVA FUNÇÃO: Amortecedor de falhas de rede (Tenta 3 vezes) 👇
+async function executeWithRetry(action, maxTentativas = 3) {
+  for (let tentativa = 1; tentativa <= maxTentativas; tentativa++) {
+    try {
+      return await action();
+    } catch (error) {
+      if (tentativa === maxTentativas) throw error;
+      const delay = 1000 * Math.pow(2, tentativa); // Espera 2s, depois 4s...
+      console.warn(`⚠️ Falha na tentativa ${tentativa} (${error.message}). Retentando em ${delay}ms...`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
 function runFfmpeg(args, stepName = "Processando") {
   return new Promise((resolve, reject) => {
     const finalArgs = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", ...args];
@@ -67,10 +81,12 @@ app.post("/render", async (req, res) => {
   const { job_id, broll_urls, audio_url } = req.body;
   if (!job_id || !audio_url) return res.status(400).json({ error: "Dados ausentes" });
 
+  // 👇 AMORTECEDOR NA FILA: Aumentado para 2 tentativas com intervalo de 5s 👇
   const job = await videoQueue.add("render-job", req.body, { 
     removeOnComplete: true, 
     removeOnFail: { age: 3600 }, 
-    attempts: 1 
+    attempts: 2,
+    backoff: { type: "fixed", delay: 5000 }
   });
   console.log(`🚀 [FILA] Novo vídeo recebido! ID: ${job_id}`);
   res.json({ status: "queued", job_id });
@@ -84,7 +100,10 @@ const worker = new Worker("video-processing", async (job) => {
   const height = output_config.height || 1280;
 
   try {
+    // 👇 LIMPEZA INTELIGENTE: Limpa restos de erro anterior antes de começar 👇
+    if (fs.existsSync(workDir)) fs.rmSync(workDir, { recursive: true, force: true });
     fs.mkdirSync(workDir, { recursive: true });
+    
     const audioPath = path.join(workDir, "audio.mp3");
     const outputPath = path.join(workDir, "output.mp4");
     const srtPath = path.join(workDir, "subs.srt");
@@ -102,7 +121,6 @@ const worker = new Worker("video-processing", async (job) => {
       downloadedClips.push(p);
     }
 
-    // 👇 1. IDENTIFICA O TIPO DE VÍDEO E A ALTURA 👇
     const isDestino = job.data.tipo_video === 'destino' || job.data.card_mode === 'destino';
     const videoHeight = isDestino ? Math.round(height * 0.65) : height;
     
@@ -137,46 +155,32 @@ const worker = new Worker("video-processing", async (job) => {
       finalArgs.push("-i", path.join(workDir, "logo.png"));
     }
 
-    // Recarrega variáveis do tempo do logo/card
     const totalVideoLength = duration > 0 ? duration : normalizedClips.length * 5;
     const isAlwaysOn = job.data.logo_always_on === true;
     const showLogoFrom = isAlwaysOn ? 0 : Math.max(0, totalVideoLength - 3);
 
-    // 👇 2. ORDEM DAS CAMADAS CORRIGIDA (Z-INDEX PERFEITO) 👇
     let filterParts = [];
     let currentV = "0:v:0";
 
-    // Passo A: Queimar a Legenda PRIMEIRO (Evita o bug de sumir após o overlay)
-    // Passo A: Queimar a Legenda PRIMEIRO (Evita o bug de sumir após o overlay)
     if (activeSubtitlePath) {
-      // Separa as margens: 40 para Destino, 90 para Viral
       const dynamicMargin = isDestino ? 70 : 90;
-      
-      // 👇 AGORA O TAMANHO TAMBÉM É DINÂMICO:
-      // Se for Destino usa tamanho 12, se for Viral volta para o tamanho original 8
       const dynamicFontSize = isDestino ? 12 : 8; 
-      
-      // Monta o estilo aplicando as duas variáveis personalizadas
       const forceStyle = `Alignment=2,MarginV=${dynamicMargin},Fontname=Montserrat,Bold=1,Fontsize=${dynamicFontSize},BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
       
       filterParts.push(`[${currentV}]subtitles=${activeSubtitlePath}:force_style='${forceStyle}'[v_subbed]`);
       currentV = "v_subbed";
     }
 
-    // Passo B: Aplicar o fundo preto e empurrar o vídeo para o topo (Apenas no Reels Destino)
     if (isDestino) {
       filterParts.push(`[${currentV}]pad=${width}:${height}:0:0:black[v_padded]`);
       currentV = "v_padded";
     }
 
-    // Passo C: Colar o Card (Destino) ou a Logo (Viral)
     if (logo_url) {
       if (isDestino) {
-        // 👇 Reels Destino: Card grande esticado ocupando a largura total no rodapé
         filterParts.push(`[2:v]scale=${width}:-1[logo]`);
         filterParts.push(`[${currentV}][logo]overlay=0:H-h:enable='gte(t,${showLogoFrom})'[v_final]`);
       } else {
-        // 👇 Reels Viral: Logo menor (350px) centralizado no TOPO (Y = 40) como era antes
         filterParts.push(`[2:v]scale=350:-1[logo]`);
         filterParts.push(`[${currentV}][logo]overlay=(W-w)/2:40:enable='gte(t,${showLogoFrom})'[v_final]`);
       }
@@ -199,12 +203,15 @@ const worker = new Worker("video-processing", async (job) => {
       const SUPABASE_URL = process.env.SUPABASE_URL;
       const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
       
-      const { data: configData } = await axios.get(`${SUPABASE_URL}/rest/v1/app_config?key=eq.google_drive_refresh_token&select=value`, {
-        headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
-      });
+      // 👇 RETRY NA BUSCA DO BANCO DE DADOS 👇
+      const { data: configData } = await executeWithRetry(() => 
+        axios.get(`${SUPABASE_URL}/rest/v1/app_config?key=eq.google_drive_refresh_token&select=value`, {
+          headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+        })
+      );
       
-      const refreshToken = configData[0]?.value;
-      if (!refreshToken) throw new Error("Token não encontrado no banco.");
+      const refreshToken = configData[0]?.value || process.env.GOOGLE_REFRESH_TOKEN;
+      if (!refreshToken) throw new Error("Token não encontrado no banco nem nas variáveis.");
 
       const clientId = process.env.GOOGLE_CLIENT_ID;
       const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
@@ -215,16 +222,18 @@ const worker = new Worker("video-processing", async (job) => {
       oauth2Client.setCredentials({ refresh_token: refreshToken });
       const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
-      const response = await drive.files.create({
+      // 👇 RETRY NO UPLOAD PARA O DRIVE (Evita o Premature Close) 👇
+      const response = await executeWithRetry(() => drive.files.create({
         requestBody: { name: `video_${job_id}.mp4`, parents: [folderId] },
         media: { mimeType: 'video/mp4', body: fs.createReadStream(outputPath) },
         fields: 'id, webViewLink'
-      });
+      }));
 
-      await drive.permissions.create({
+      // 👇 RETRY NA PERMISSÃO DO ARQUIVO 👇
+      await executeWithRetry(() => drive.permissions.create({
         fileId: response.data.id,
         requestBody: { role: 'reader', type: 'anyone' }
-      });
+      }));
 
       finalVideoUrl = response.data.webViewLink;
       console.log(`✅ [DRIVE] Link permanente gerado: ${finalVideoUrl}`);
@@ -246,6 +255,12 @@ const worker = new Worker("video-processing", async (job) => {
       if (fs.existsSync(workDir)) fs.rmSync(workDir, { recursive: true, force: true });
     }, 15 * 60 * 1000);
   }
-}, { connection, concurrency: 1 });
+// 👇 AMORTECEDOR DO CADEADO: Aumentado para 10 minutos 👇
+}, { 
+  connection, 
+  concurrency: 1,
+  lockDuration: 600000, 
+  lockRenewTime: 120000 
+});
 
 app.listen(PORT, () => console.log(`🚀 Worker de Vídeo Ativo na porta ${PORT}`));
