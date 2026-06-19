@@ -81,7 +81,6 @@ app.post("/render", async (req, res) => {
   const { job_id, broll_urls, audio_url } = req.body;
   if (!job_id || !audio_url) return res.status(400).json({ error: "Dados ausentes" });
 
-  // 👇 AMORTECEDOR NA FILA: Aumentado para 2 tentativas com intervalo de 5s 👇
   const job = await videoQueue.add("render-job", req.body, { 
     removeOnComplete: true, 
     removeOnFail: { age: 3600 }, 
@@ -100,7 +99,6 @@ const worker = new Worker("video-processing", async (job) => {
   const height = output_config.height || 1280;
 
   try {
-    // 👇 LIMPEZA INTELIGENTE: Limpa restos de erro anterior antes de começar 👇
     if (fs.existsSync(workDir)) fs.rmSync(workDir, { recursive: true, force: true });
     fs.mkdirSync(workDir, { recursive: true });
     
@@ -197,7 +195,6 @@ const worker = new Worker("video-processing", async (job) => {
 
     await runFfmpeg(finalArgs, "Renderização Final");
 
-    // 👇 O RESPIRO DO SERVIDOR FOI ADICIONADO AQUI 👇
     console.log("🧘‍♂️ Dando um respiro de 10 segundos para o servidor recuperar a rede...");
     await new Promise(r => setTimeout(r, 10000));
 
@@ -207,7 +204,6 @@ const worker = new Worker("video-processing", async (job) => {
       const SUPABASE_URL = process.env.SUPABASE_URL;
       const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
       
-      // 👇 RETRY NA BUSCA DO BANCO DE DADOS 👇
       const { data: configData } = await executeWithRetry(() => 
         axios.get(`${SUPABASE_URL}/rest/v1/app_config?key=eq.google_drive_refresh_token&select=value`, {
           headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
@@ -221,19 +217,31 @@ const worker = new Worker("video-processing", async (job) => {
       const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
       const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
 
-      console.log(`☁️ [DRIVE] Autenticando e fazendo upload...`);
-      const oauth2Client = new google.auth.OAuth2(clientId, clientSecret);
-      oauth2Client.setCredentials({ refresh_token: refreshToken });
+      // 👇 ESTRATÉGIA NOVA: FUGIR DO BUG USANDO AXIOS PARA O TOKEN 👇
+      console.log(`☁️ [DRIVE] Gerando access_token com Axios (evitando bug do Node)...`);
+      const tokenRes = await executeWithRetry(() => 
+        axios.post("https://oauth2.googleapis.com/token", new URLSearchParams({
+          client_id: clientId,
+          client_secret: clientSecret,
+          refresh_token: refreshToken,
+          grant_type: "refresh_token"
+        }).toString(), {
+          headers: { "Content-Type": "application/x-www-form-urlencoded" }
+        })
+      );
+
+      console.log(`☁️ [DRIVE] Autenticando e fazendo upload do ficheiro...`);
+      const oauth2Client = new google.auth.OAuth2();
+      // Em vez do Refresh Token, entregamos o Token já aberto à biblioteca do Drive
+      oauth2Client.setCredentials({ access_token: tokenRes.data.access_token });
       const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
-      // 👇 RETRY NO UPLOAD PARA O DRIVE (Evita o Premature Close) 👇
       const response = await executeWithRetry(() => drive.files.create({
         requestBody: { name: `video_${job_id}.mp4`, parents: [folderId] },
         media: { mimeType: 'video/mp4', body: fs.createReadStream(outputPath) },
         fields: 'id, webViewLink'
       }));
 
-      // 👇 RETRY NA PERMISSÃO DO ARQUIVO 👇
       await executeWithRetry(() => drive.permissions.create({
         fileId: response.data.id,
         requestBody: { role: 'reader', type: 'anyone' }
@@ -259,7 +267,6 @@ const worker = new Worker("video-processing", async (job) => {
       if (fs.existsSync(workDir)) fs.rmSync(workDir, { recursive: true, force: true });
     }, 15 * 60 * 1000);
   }
-// 👇 AMORTECEDOR DO CADEADO: Aumentado para 10 minutos 👇
 }, { 
   connection, 
   concurrency: 1,
