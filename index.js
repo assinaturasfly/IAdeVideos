@@ -24,14 +24,14 @@ const connection = new IORedis(REDIS_URL, { maxRetriesPerRequest: null });
 const videoQueue = new Queue("video-processing", { connection });
 videoQueue.obliterate({ force: true }).catch(() => {});
 
-// 👇 NOVA FUNÇÃO: Amortecedor de falhas de rede (Tenta 3 vezes) 👇
+// 👇 Amortecedor de falhas de rede (Tenta 3 vezes) 👇
 async function executeWithRetry(action, maxTentativas = 3) {
   for (let tentativa = 1; tentativa <= maxTentativas; tentativa++) {
     try {
       return await action();
     } catch (error) {
       if (tentativa === maxTentativas) throw error;
-      const delay = 1000 * Math.pow(2, tentativa); // Espera 2s, depois 4s...
+      const delay = 1000 * Math.pow(2, tentativa);
       console.warn(`⚠️ Falha na tentativa ${tentativa} (${error.message}). Retentando em ${delay}ms...`);
       await new Promise(r => setTimeout(r, delay));
     }
@@ -217,7 +217,6 @@ const worker = new Worker("video-processing", async (job) => {
       const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
       const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
 
-      // 👇 ESTRATÉGIA NOVA: FUGIR DO BUG USANDO AXIOS PARA O TOKEN 👇
       console.log(`☁️ [DRIVE] Gerando access_token com Axios (evitando bug do Node)...`);
       const tokenRes = await executeWithRetry(() => 
         axios.post("https://oauth2.googleapis.com/token", new URLSearchParams({
@@ -232,7 +231,6 @@ const worker = new Worker("video-processing", async (job) => {
 
       console.log(`☁️ [DRIVE] Autenticando e fazendo upload do ficheiro...`);
       const oauth2Client = new google.auth.OAuth2();
-      // Em vez do Refresh Token, entregamos o Token já aberto à biblioteca do Drive
       oauth2Client.setCredentials({ access_token: tokenRes.data.access_token });
       const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
@@ -242,10 +240,14 @@ const worker = new Worker("video-processing", async (job) => {
         fields: 'id, webViewLink'
       }));
 
-      await executeWithRetry(() => drive.permissions.create({
-        fileId: response.data.id,
-        requestBody: { role: 'reader', type: 'anyone' }
-      }));
+      // 👇 ESTRATÉGIA NOVA PARA AS PERMISSÕES: Axios ao resgate! 👇
+      console.log(`🔓 [DRIVE] A alterar permissões de partilha com Axios...`);
+      await executeWithRetry(() => 
+        axios.post(`https://www.googleapis.com/drive/v3/files/${response.data.id}/permissions`, 
+        { role: 'reader', type: 'anyone' },
+        { headers: { Authorization: `Bearer ${tokenRes.data.access_token}` } }
+        )
+      );
 
       finalVideoUrl = response.data.webViewLink;
       console.log(`✅ [DRIVE] Link permanente gerado: ${finalVideoUrl}`);
