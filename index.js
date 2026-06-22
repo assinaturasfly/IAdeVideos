@@ -329,4 +329,54 @@ const worker = new Worker("video-processing", async (job) => {
 });
 
 app.get("/", (req, res) => res.send("Worker de Vídeo com Fila - Ativo"));
+
+// ── Proxy TripAdvisor (evita bloqueio de CORS no browser) ────────────────────
+app.get("/api/tripadvisor", async (req, res) => {
+  res.header("Access-Control-Allow-Origin", "*");
+
+  const query = String(req.query.query ?? "").trim();
+  if (!query) {
+    return res.status(400).json({ error: "Parâmetro 'query' obrigatório" });
+  }
+
+  const apiKey = process.env.TRIPADVISOR_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: "TRIPADVISOR_API_KEY não configurada no servidor" });
+  }
+
+  const BASE = "https://api.content.tripadvisor.com/api/v1";
+
+  try {
+    // Passo 1: localizar o hotel pelo nome
+    const searchRes = await axios.get(`${BASE}/location/search`, {
+      params: { searchQuery: query, category: "hotels", language: "pt", key: apiKey },
+      headers: { accept: "application/json" },
+    });
+
+    const locations = searchRes.data?.data ?? [];
+    if (!locations.length) return res.json({ data: [] });
+
+    const locationId = locations[0].location_id;
+
+    // Passo 2: buscar as fotos do hotel
+    const photosRes = await axios.get(`${BASE}/location/${locationId}/photos`, {
+      params: { language: "pt", key: apiKey },
+      headers: { accept: "application/json" },
+    });
+
+    const photos = (photosRes.data?.data ?? [])
+      .map((item) => ({
+        id: String(item.id ?? Math.random()),
+        url:   item.images?.original?.url ?? item.images?.large?.url  ?? "",
+        thumb: item.images?.medium?.url   ?? item.images?.small?.url  ?? "",
+      }))
+      .filter((p) => p.url && p.thumb);
+
+    res.json({ data: photos });
+  } catch (err) {
+    console.error("[TripAdvisor proxy]", err.message);
+    res.status(502).json({ error: `Erro ao consultar TripAdvisor: ${err.message}` });
+  }
+});
+
 app.listen(PORT, () => console.log("Servidor rodando na porta", PORT));
