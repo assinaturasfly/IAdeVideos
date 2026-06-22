@@ -336,8 +336,8 @@ app.get("/api/tripadvisor", async (req, res) => {
     const photos = (photosRes.data?.data ?? [])
       .map((item) => ({
         id:    String(item.id ?? Math.random()),
-        url:   item.photo?.original_size_url ?? "",
-        thumb: item.photo?.original_size_url ?? "",
+        url:   item.photo?.original_size_url ?? item.photo?.large_url ?? item.photo?.standard_url ?? "",
+        thumb: item.photo?.standard_url ?? item.photo?.thumbnail_url ?? item.photo?.original_size_url ?? "",
       }))
       .filter((p) => p.url);
 
