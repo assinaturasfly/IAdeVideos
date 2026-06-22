@@ -336,7 +336,11 @@ app.get("/api/tripadvisor", async (req, res) => {
 
     res.json({ data: photos });
   } catch (err) {
-    console.error("[TripAdvisor proxy]", err.message);
+    if (err.response) {
+      console.error("[TripAdvisor proxy erro real]:", JSON.stringify(err.response.data));
+    } else {
+      console.error("[TripAdvisor proxy erro mensagem]:", err.message);
+    }
     res.status(502).json({ error: `Erro ao consultar TripAdvisor: ${err.message}` });
   }
 });
