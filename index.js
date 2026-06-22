@@ -313,9 +313,15 @@ app.get("/api/tripadvisor", async (req, res) => {
 
   const BASE = "https://api.content.tripadvisor.com/api/v1";
   try {
+    const taHeaders = {
+      accept: "application/json",
+      Origin: "https://iadevideos.onrender.com",
+      Referer: "https://iadevideos.onrender.com",
+    };
+
     const searchRes = await axios.get(`${BASE}/location/search`, {
       params: { searchQuery: query, category: "hotels", language: "pt", key: apiKey },
-      headers: { accept: "application/json" },
+      headers: taHeaders,
     });
     const locations = searchRes.data?.data ?? [];
     if (!locations.length) return res.json({ data: [] });
@@ -323,7 +329,7 @@ app.get("/api/tripadvisor", async (req, res) => {
     const locationId = locations[0].location_id;
     const photosRes = await axios.get(`${BASE}/location/${locationId}/photos`, {
       params: { language: "pt", key: apiKey },
-      headers: { accept: "application/json" },
+      headers: taHeaders,
     });
 
     const photos = (photosRes.data?.data ?? [])
