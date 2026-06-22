@@ -329,9 +329,11 @@ app.get("/api/tripadvisor", async (req, res) => {
 
     // Passo 2: buscar as fotos do hotel
     const photosRes = await axios.get(`${BASE}/locations/${locationId}/photos`, {
-      params: { page: 0, size: 50 },
+      params: { limit: 50 },
       headers: taHeaders,
     });
+
+    console.log("[TripAdvisor RAW Photo]:", JSON.stringify(photosRes.data?.data?.[0]));
 
     const photos = (photosRes.data?.data ?? [])
       .map((item) => ({
