@@ -140,7 +140,6 @@ const worker = new Worker("video-processing", async (job) => {
     const subtitle_url = job.data.subtitle_url || output_config.subtitle_url;
     const subtitle_text = job.data.subtitle_text || output_config.subtitle_text;
 
-    // Se NÃO for estático, processa as legendas
     if (!isEstatico) {
       if (subtitle_url) {
         await downloadToFile(subtitle_url, srtPath);
@@ -151,17 +150,22 @@ const worker = new Worker("video-processing", async (job) => {
       }
     }
 
-    // Input 0: Vídeo em loop infinito
     const finalArgs = ["-stream_loop", "-1", "-f", "concat", "-safe", "0", "-i", playlistPath];
     
-    // Input 1: Áudio (Se for estático com música/silêncio curto, faz loop do áudio também)
+    // A MÁGICA ESTÁ AQUI: Se for estático e o frontend mandar o 'silence.mp3',
+    // nós usamos o gerador de silêncio perfeito do FFmpeg em vez de tentar ler o MP3 quebrado!
+    const isSilenceMp3 = audio_url && audio_url.includes("silence.mp3");
+
     if (isEstatico) {
-      finalArgs.push("-stream_loop", "-1", "-i", audioPath);
+      if (isSilenceMp3) {
+        finalArgs.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100");
+      } else {
+        finalArgs.push("-stream_loop", "-1", "-i", audioPath); // Se for música normal, ele faz o loop normal.
+      }
     } else {
       finalArgs.push("-i", audioPath);
     }
 
-    // Input 2: Imagem Overlay (O PNG grande ou a logo pequena)
     const overlayImg = overlay_image_url || logo_url;
     if (overlayImg) {
       await downloadToFile(overlayImg, path.join(workDir, "overlay.png"));
@@ -191,15 +195,12 @@ const worker = new Worker("video-processing", async (job) => {
 
     if (overlayImg) {
       if (isEstatico) {
-        // Novo Modelo: Estica a imagem com fundo transparente para o ecrã inteiro
         filterParts.push(`[2:v]scale=${width}:${height}[logo]`);
         filterParts.push(`[${currentV}][logo]overlay=0:0[v_final]`);
       } else if (isDestino) {
-        // Modelo Destino
         filterParts.push(`[2:v]scale=${width}:-1[logo]`);
         filterParts.push(`[${currentV}][logo]overlay=0:H-h:enable='gte(t,${showLogoFrom})'[v_final]`);
       } else {
-        // Modelo Normal (Reels)
         filterParts.push(`[2:v]scale=350:-1[logo]`);
         filterParts.push(`[${currentV}][logo]overlay=(W-w)/2:40:enable='gte(t,${showLogoFrom})'[v_final]`);
       }
@@ -214,10 +215,9 @@ const worker = new Worker("video-processing", async (job) => {
 
     finalArgs.push("-map", videoMap, "-map", "1:a:0");
 
-    // Limita o tempo do vídeo!
+    // Limite de tempo (30 segundos para estático, corte no áudio para os outros)
     if (isEstatico) {
-      // Reels estáticos têm sempre 12 segundos fixos
-      finalArgs.push("-t", "12"); 
+      finalArgs.push("-t", "30"); 
     } else {
       finalArgs.push("-shortest");
     }
