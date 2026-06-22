@@ -24,7 +24,6 @@ const connection = new IORedis(REDIS_URL, { maxRetriesPerRequest: null });
 const videoQueue = new Queue("video-processing", { connection });
 videoQueue.obliterate({ force: true }).catch(() => {});
 
-// 👇 Amortecedor de falhas de rede (Tenta 3 vezes) 👇
 async function executeWithRetry(action, maxTentativas = 3) {
   for (let tentativa = 1; tentativa <= maxTentativas; tentativa++) {
     try {
@@ -78,7 +77,6 @@ async function getMediaDuration(filePath) {
 }
 
 app.post("/render", async (req, res) => {
-  // 👇 ESPIÃO ADICIONADO AQUI 👇
   console.log("📥 DADOS RECEBIDOS NA PORTA DE ENTRADA:", JSON.stringify(req.body, null, 2));
 
   const { job_id, broll_urls, audio_url } = req.body;
@@ -95,7 +93,7 @@ app.post("/render", async (req, res) => {
 });
 
 const worker = new Worker("video-processing", async (job) => {
-  const { job_id, audio_url, webhook_url, webhook_secret, logo_url } = job.data;
+  const { job_id, audio_url, webhook_url, webhook_secret, logo_url, overlay_image_url, tipo_video } = job.data;
   const workDir = path.join("/tmp", "video-worker", job_id);
   const output_config = job.data.output_config || {};
   const width = output_config.width || 720;
@@ -122,7 +120,8 @@ const worker = new Worker("video-processing", async (job) => {
       downloadedClips.push(p);
     }
 
-    const isDestino = job.data.tipo_video === 'destino' || job.data.card_mode === 'destino';
+    const isEstatico = tipo_video === 'reels_estatico';
+    const isDestino = tipo_video === 'destino' || job.data.card_mode === 'destino';
     const videoHeight = isDestino ? Math.round(height * 0.65) : height;
     
     const vf = `fps=30,scale=${width}:${videoHeight}:force_original_aspect_ratio=increase,crop=${width}:${videoHeight},eq=contrast=1.05:saturation=1.3,unsharp=5:5:0.8:5:5:0.0,format=yuv420p`;
@@ -141,19 +140,32 @@ const worker = new Worker("video-processing", async (job) => {
     const subtitle_url = job.data.subtitle_url || output_config.subtitle_url;
     const subtitle_text = job.data.subtitle_text || output_config.subtitle_text;
 
-    if (subtitle_url) {
-      await downloadToFile(subtitle_url, srtPath);
-      activeSubtitlePath = srtPath;
-    } else if (subtitle_text) {
-      fs.writeFileSync(srtPath, subtitle_text);
-      activeSubtitlePath = srtPath;
+    // Se NÃO for estático, processa as legendas
+    if (!isEstatico) {
+      if (subtitle_url) {
+        await downloadToFile(subtitle_url, srtPath);
+        activeSubtitlePath = srtPath;
+      } else if (subtitle_text) {
+        fs.writeFileSync(srtPath, subtitle_text);
+        activeSubtitlePath = srtPath;
+      }
     }
 
-    const finalArgs = ["-stream_loop", "-1", "-f", "concat", "-safe", "0", "-i", playlistPath, "-i", audioPath];
+    // Input 0: Vídeo em loop infinito
+    const finalArgs = ["-stream_loop", "-1", "-f", "concat", "-safe", "0", "-i", playlistPath];
     
-    if (logo_url) {
-      await downloadToFile(logo_url, path.join(workDir, "logo.png"));
-      finalArgs.push("-i", path.join(workDir, "logo.png"));
+    // Input 1: Áudio (Se for estático com música/silêncio curto, faz loop do áudio também)
+    if (isEstatico) {
+      finalArgs.push("-stream_loop", "-1", "-i", audioPath);
+    } else {
+      finalArgs.push("-i", audioPath);
+    }
+
+    // Input 2: Imagem Overlay (O PNG grande ou a logo pequena)
+    const overlayImg = overlay_image_url || logo_url;
+    if (overlayImg) {
+      await downloadToFile(overlayImg, path.join(workDir, "overlay.png"));
+      finalArgs.push("-i", path.join(workDir, "overlay.png"));
     }
 
     const totalVideoLength = duration > 0 ? duration : normalizedClips.length * 5;
@@ -163,28 +175,31 @@ const worker = new Worker("video-processing", async (job) => {
     let filterParts = [];
     let currentV = "0:v:0";
 
-    if (activeSubtitlePath) {
+    if (activeSubtitlePath && !isEstatico) {
       const dynamicMargin = isDestino ? 70 : 90;
       const dynamicFontSize = isDestino ? 12 : 8; 
       const forceStyle = `Alignment=2,MarginV=${dynamicMargin},Fontname=Montserrat,Bold=1,Fontsize=${dynamicFontSize},BorderStyle=1,Outline=0.4,OutlineColour=&H00000000`;
-      
-      // 👇 PROTEÇÃO PARA AS BARRAS E CIFRÃO ($ / :) QUE ADICIONAMOS ANTES 👇
       const escapedSrtPath = activeSubtitlePath.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "'\\\\\\''");
-      
       filterParts.push(`[${currentV}]subtitles='${escapedSrtPath}':force_style='${forceStyle}'[v_subbed]`);
       currentV = "v_subbed";
     }
 
-    if (isDestino) {
+    if (isDestino && !isEstatico) {
       filterParts.push(`[${currentV}]pad=${width}:${height}:0:0:black[v_padded]`);
       currentV = "v_padded";
     }
 
-    if (logo_url) {
-      if (isDestino) {
+    if (overlayImg) {
+      if (isEstatico) {
+        // Novo Modelo: Estica a imagem com fundo transparente para o ecrã inteiro
+        filterParts.push(`[2:v]scale=${width}:${height}[logo]`);
+        filterParts.push(`[${currentV}][logo]overlay=0:0[v_final]`);
+      } else if (isDestino) {
+        // Modelo Destino
         filterParts.push(`[2:v]scale=${width}:-1[logo]`);
         filterParts.push(`[${currentV}][logo]overlay=0:H-h:enable='gte(t,${showLogoFrom})'[v_final]`);
       } else {
+        // Modelo Normal (Reels)
         filterParts.push(`[2:v]scale=350:-1[logo]`);
         filterParts.push(`[${currentV}][logo]overlay=(W-w)/2:40:enable='gte(t,${showLogoFrom})'[v_final]`);
       }
@@ -197,7 +212,17 @@ const worker = new Worker("video-processing", async (job) => {
       videoMap = `[${currentV}]`;
     }
 
-    finalArgs.push("-map", videoMap, "-map", "1:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p", "-shortest", outputPath);
+    finalArgs.push("-map", videoMap, "-map", "1:a:0");
+
+    // Limita o tempo do vídeo!
+    if (isEstatico) {
+      // Reels estáticos têm sempre 12 segundos fixos
+      finalArgs.push("-t", "12"); 
+    } else {
+      finalArgs.push("-shortest");
+    }
+
+    finalArgs.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p", outputPath);
 
     await runFfmpeg(finalArgs, "Renderização Final");
 
@@ -223,7 +248,6 @@ const worker = new Worker("video-processing", async (job) => {
       const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
       const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
 
-      console.log(`☁️ [DRIVE] Gerando access_token com Axios (evitando bug do Node)...`);
       const tokenRes = await executeWithRetry(() => 
         axios.post("https://oauth2.googleapis.com/token", new URLSearchParams({
           client_id: clientId,
@@ -235,7 +259,6 @@ const worker = new Worker("video-processing", async (job) => {
         })
       );
 
-      console.log(`☁️ [DRIVE] Autenticando e fazendo upload do ficheiro...`);
       const oauth2Client = new google.auth.OAuth2();
       oauth2Client.setCredentials({ access_token: tokenRes.data.access_token });
       const drive = google.drive({ version: 'v3', auth: oauth2Client });
@@ -246,7 +269,6 @@ const worker = new Worker("video-processing", async (job) => {
         fields: 'id, webViewLink'
       }));
 
-      console.log(`🔓 [DRIVE] A alterar permissões de partilha com Axios...`);
       await executeWithRetry(() => 
         axios.post(`https://www.googleapis.com/drive/v3/files/${response.data.id}/permissions`, 
         { role: 'reader', type: 'anyone' },
