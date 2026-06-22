@@ -303,7 +303,7 @@ const worker = new Worker("video-processing", async (job) => {
   lockRenewTime: 120000 
 });
 
-// ── Proxy TripAdvisor (evita bloqueio de CORS no browser) ───────────────────
+// ── Proxy TripAdvisor Terra API (evita bloqueio de CORS no browser) ─────────
 app.get("/api/tripadvisor", async (req, res) => {
   const query = String(req.query.query ?? "").trim();
   if (!query) return res.status(400).json({ error: "Parâmetro 'query' obrigatório" });
@@ -311,34 +311,35 @@ app.get("/api/tripadvisor", async (req, res) => {
   const apiKey = process.env.TRIPADVISOR_API_KEY;
   if (!apiKey) return res.status(500).json({ error: "TRIPADVISOR_API_KEY não configurada no servidor" });
 
-  const BASE = "https://api.content.tripadvisor.com/api/v1";
-  try {
-    const taHeaders = {
-      accept: "application/json",
-      Origin: "https://iadevideos.onrender.com",
-      Referer: "https://iadevideos.onrender.com",
-    };
+  // Terra API — nova plataforma (substitui api.content.tripadvisor.com)
+  const BASE = "https://terra.tripadvisor.com/api";
+  const taHeaders = { accept: "application/json", "X-API-Key": apiKey };
 
-    const searchRes = await axios.get(`${BASE}/location/search`, {
-      params: { searchQuery: query, category: "hotels", language: "pt", key: apiKey },
+  try {
+    // Passo 1: localizar o hotel pelo nome
+    const searchRes = await axios.get(`${BASE}/locations/search`, {
+      params: { query, category: "HOTEL", size: 5 },
       headers: taHeaders,
     });
     const locations = searchRes.data?.data ?? [];
     if (!locations.length) return res.json({ data: [] });
 
-    const locationId = locations[0].location_id;
-    const photosRes = await axios.get(`${BASE}/location/${locationId}/photos`, {
-      params: { language: "pt", key: apiKey },
+    const locationId = locations[0].location?.id;
+    if (!locationId) return res.json({ data: [] });
+
+    // Passo 2: buscar as fotos do hotel
+    const photosRes = await axios.get(`${BASE}/locations/${locationId}/photos`, {
+      params: { page: 0, size: 10 },
       headers: taHeaders,
     });
 
     const photos = (photosRes.data?.data ?? [])
       .map((item) => ({
-        id: String(item.id ?? Math.random()),
-        url:   item.images?.original?.url ?? item.images?.large?.url  ?? "",
-        thumb: item.images?.medium?.url   ?? item.images?.small?.url  ?? "",
+        id:    String(item.id ?? Math.random()),
+        url:   item.photo?.original_size_url ?? "",
+        thumb: item.photo?.original_size_url ?? "",
       }))
-      .filter((p) => p.url && p.thumb);
+      .filter((p) => p.url);
 
     res.json({ data: photos });
   } catch (err) {
