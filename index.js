@@ -329,7 +329,7 @@ app.get("/api/tripadvisor", async (req, res) => {
 
     // Passo 2: buscar as fotos do hotel
     const photosRes = await axios.get(`${BASE}/locations/${locationId}/photos`, {
-      params: { page: 0, size: 10 },
+      params: { page: 0, size: 50 },
       headers: taHeaders,
     });
 
