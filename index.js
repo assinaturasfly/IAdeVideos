@@ -318,7 +318,7 @@ app.get("/api/tripadvisor", async (req, res) => {
   try {
     // Passo 1: localizar o hotel pelo nome
     const searchRes = await axios.get(`${BASE}/locations/search`, {
-      params: { query, category: "HOTEL", locale: ["pt"], size: 5 },
+      params: { query, category: "HOTEL", locale: ["pt-BR"], size: 5 },
       headers: taHeaders,
     });
     const locations = searchRes.data?.data ?? [];
