@@ -327,7 +327,7 @@ app.get("/api/tripadvisor", async (req, res) => {
     const locationId = locations[0].location?.id;
     if (!locationId) return res.json({ data: [], restaurants: [], attractions: [] });
 
-    const nearbyParams = { location_id: locationId, radius: 5, unit: "KM", size: 5, locale: "pt-BR" };
+    const nearbyParams = { location_id: locationId, radius: 15, unit: "KM", size: 15, locale: "pt-BR" };
 
     // Passos 2-4 em paralelo: fotos + restaurantes próximos + atrações próximas
     const [photosRes, restaurantsRes, attractionsRes] = await Promise.all([
