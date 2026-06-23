@@ -327,14 +327,28 @@ app.get("/api/tripadvisor", async (req, res) => {
     const locationId = locations[0].location?.id;
     if (!locationId) return res.json({ data: [] });
 
-    // Passo 2: buscar as fotos do hotel
-    const photosRes = await axios.get(`${BASE}/locations/${locationId}/photos`, {
-      params: { size: 50 },
-      headers: taHeaders,
-    });
+    const nearbyParams = { location_id: locationId, size: 5, unit: "KM", locale: ["pt-BR"] };
 
-    console.log("[TripAdvisor RAW Photo]:", JSON.stringify(photosRes.data?.data?.[0]));
-    console.log("Qtd fotos recebidas:", photosRes.data?.data?.length);
+    // Passos 2-4 em paralelo: fotos + restaurantes próximos + atrações próximas
+    const [photosRes, restaurantsRes, attractionsRes] = await Promise.all([
+      axios.get(`${BASE}/locations/${locationId}/photos`, {
+        params: { size: 50 },
+        headers: taHeaders,
+      }),
+      axios.get(`${BASE}/locations/nearby`, {
+        params: { ...nearbyParams, category: "RESTAURANT" },
+        headers: taHeaders,
+      }),
+      axios.get(`${BASE}/locations/nearby`, {
+        params: { ...nearbyParams, category: "ATTRACTION" },
+        headers: taHeaders,
+      }),
+    ]);
+
+    console.log("[TripAdvisor] Qtd fotos recebidas:", photosRes.data?.data?.length);
+    console.log("[TripAdvisor] RAW Photo[0]:", JSON.stringify(photosRes.data?.data?.[0]));
+    console.log("[TripAdvisor] Restaurantes próximos:", restaurantsRes.data?.data?.length);
+    console.log("[TripAdvisor] Atrações próximas:", attractionsRes.data?.data?.length);
 
     const photos = (photosRes.data?.data ?? [])
       .map((item) => ({
@@ -344,7 +358,22 @@ app.get("/api/tripadvisor", async (req, res) => {
       }))
       .filter((p) => p.url);
 
-    res.json({ data: photos });
+    const parseNearby = (items) => (items ?? []).map((item) => {
+      const names = item.location?.names ?? [];
+      const name = names.find((n) => n.language === "pt-BR")?.value ?? names[0]?.value ?? "";
+      const cats = item.location?.categories ?? [];
+      const category = cats[0]?.name ?? "";
+      const distance_km = item.distance_kilometers ?? null;
+      return { name, category, distance_km };
+    }).filter((r) => r.name);
+
+    const restaurants = parseNearby(restaurantsRes.data?.data);
+    const attractions = parseNearby(attractionsRes.data?.data);
+
+    console.log("[TripAdvisor] Restaurantes parseados:", JSON.stringify(restaurants));
+    console.log("[TripAdvisor] Atrações parseadas:", JSON.stringify(attractions));
+
+    res.json({ data: photos, restaurants, attractions });
   } catch (err) {
     if (err.response) {
       console.error("[TripAdvisor proxy erro real]:", JSON.stringify(err.response.data));
