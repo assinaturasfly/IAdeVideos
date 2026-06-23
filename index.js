@@ -318,7 +318,7 @@ app.get("/api/tripadvisor", async (req, res) => {
   try {
     // Passo 1: localizar o hotel pelo nome
     const searchRes = await axios.get(`${BASE}/locations/search`, {
-      params: { query, category: "HOTEL", locale: ["pt-BR"], size: 5 },
+      params: { query, locale: ["pt-BR"], size: 5 },
       headers: taHeaders,
     });
     const locations = searchRes.data?.data ?? [];
@@ -329,11 +329,12 @@ app.get("/api/tripadvisor", async (req, res) => {
 
     // Passo 2: buscar as fotos do hotel
     const photosRes = await axios.get(`${BASE}/locations/${locationId}/photos`, {
-      params: { size: 50 },
+      params: { limit: 50 },
       headers: taHeaders,
     });
 
     console.log("[TripAdvisor RAW Photo]:", JSON.stringify(photosRes.data?.data?.[0]));
+    console.log("Qtd fotos recebidas:", photosRes.data?.data?.length);
 
     const photos = (photosRes.data?.data ?? [])
       .map((item) => ({
