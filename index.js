@@ -318,7 +318,7 @@ app.get("/api/tripadvisor", async (req, res) => {
   try {
     // Passo 1: localizar o hotel pelo nome
     const searchRes = await axios.get(`${BASE}/locations/search`, {
-      params: { query, category: "HOTEL", locale: "pt-BR", size: 5 },
+      params: { searchQuery: query, category: "hotels", language: "pt", size: 5 },
       headers: taHeaders,
     });
     const locations = searchRes.data?.data ?? [];
@@ -327,7 +327,7 @@ app.get("/api/tripadvisor", async (req, res) => {
     const locationId = locations[0].location?.id;
     if (!locationId) return res.json({ data: [], restaurants: [], attractions: [] });
 
-    const nearbyParams = { location_id: locationId, size: 5, unit: "KM", locale: "pt-BR" };
+    const nearbyParams = { location_id: locationId, size: 5, unit: "KM", language: "pt" };
 
     // Passos 2-4 em paralelo: fotos + restaurantes próximos + atrações próximas
     const [photosRes, restaurantsRes, attractionsRes] = await Promise.all([
@@ -336,11 +336,11 @@ app.get("/api/tripadvisor", async (req, res) => {
         headers: taHeaders,
       }),
       axios.get(`${BASE}/locations/nearby`, {
-        params: { ...nearbyParams, category: "RESTAURANT" },
+        params: { ...nearbyParams, category: "restaurants" },
         headers: taHeaders,
       }),
       axios.get(`${BASE}/locations/nearby`, {
-        params: { ...nearbyParams, category: "ATTRACTION" },
+        params: { ...nearbyParams, category: "attractions" },
         headers: taHeaders,
       }),
     ]);
