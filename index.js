@@ -384,5 +384,26 @@ app.get("/api/tripadvisor", async (req, res) => {
   }
 });
 
+// ── Proxy de imagem (evita CORS no canvas do html-to-image) ─────────────────
+app.get("/api/proxy-image", async (req, res) => {
+  const url = String(req.query.url ?? "").trim();
+  if (!url) return res.status(400).json({ error: "Parâmetro 'url' obrigatório" });
+  try {
+    const response = await axios.get(url, {
+      responseType: "arraybuffer",
+      timeout: 15000,
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; ViralFlux/1.0)" },
+    });
+    const contentType = response.headers["content-type"] || "image/jpeg";
+    res.set("Access-Control-Allow-Origin", "*");
+    res.set("Content-Type", contentType);
+    res.set("Cache-Control", "public, max-age=86400");
+    res.send(Buffer.from(response.data));
+  } catch (err) {
+    console.error("[proxy-image] Erro:", err.message);
+    res.status(502).json({ error: `Falha ao buscar imagem: ${err.message}` });
+  }
+});
+
 app.get("/", (req, res) => res.send("🚀 Worker de Vídeo Ativo"));
 app.listen(PORT, () => console.log(`🚀 Worker de Vídeo Ativo na porta ${PORT}`));
