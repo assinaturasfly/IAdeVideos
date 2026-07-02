@@ -93,7 +93,8 @@ app.post("/render", async (req, res) => {
 });
 
 const worker = new Worker("video-processing", async (job) => {
-  const { job_id, audio_url, webhook_url, webhook_secret, logo_url, overlay_image_url, tipo_video } = job.data;
+  // 1. ADICIONADO: watermark_url desestruturado
+  const { job_id, audio_url, webhook_url, webhook_secret, logo_url, overlay_image_url, tipo_video, watermark_url } = job.data;
   const workDir = path.join("/tmp", "video-worker", job_id);
   const output_config = job.data.output_config || {};
   const width = output_config.width || 720;
@@ -152,24 +153,36 @@ const worker = new Worker("video-processing", async (job) => {
 
     const finalArgs = ["-stream_loop", "-1", "-f", "concat", "-safe", "0", "-i", playlistPath];
     
-    // A MÁGICA ESTÁ AQUI: Se for estático e o frontend mandar o 'silence.mp3',
-    // nós usamos o gerador de silêncio perfeito do FFmpeg em vez de tentar ler o MP3 quebrado!
     const isSilenceMp3 = audio_url && audio_url.includes("silence.mp3");
 
     if (isEstatico) {
       if (isSilenceMp3) {
         finalArgs.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100");
       } else {
-        finalArgs.push("-stream_loop", "-1", "-i", audioPath); // Se for música normal, ele faz o loop normal.
+        finalArgs.push("-stream_loop", "-1", "-i", audioPath);
       }
     } else {
       finalArgs.push("-i", audioPath);
     }
 
+    // 2. ADICIONADO: Lógica de índices dinâmicos para suportar overlay + watermark
+    let inputIndex = 2; // 0 é o video base, 1 é o audio. Os próximos começam do 2.
+    
     const overlayImg = overlay_image_url || logo_url;
+    let overlayIndex = -1;
     if (overlayImg) {
       await downloadToFile(overlayImg, path.join(workDir, "overlay.png"));
       finalArgs.push("-i", path.join(workDir, "overlay.png"));
+      overlayIndex = inputIndex++;
+    }
+
+    // 3. ADICIONADO: Download da Marca d'água, se enviada pelo backend
+    let watermarkIndex = -1;
+    if (watermark_url) {
+      console.log(`📦 [JOB ${job_id}] Baixando Marca D'água...`);
+      await downloadToFile(watermark_url, path.join(workDir, "watermark.png"));
+      finalArgs.push("-i", path.join(workDir, "watermark.png"));
+      watermarkIndex = inputIndex++;
     }
 
     const totalVideoLength = duration > 0 ? duration : normalizedClips.length * 5;
@@ -193,18 +206,25 @@ const worker = new Worker("video-processing", async (job) => {
       currentV = "v_padded";
     }
 
-    if (overlayImg) {
+    if (overlayIndex !== -1) {
       if (isEstatico) {
-        filterParts.push(`[2:v]scale=${width}:${height}[logo]`);
-        filterParts.push(`[${currentV}][logo]overlay=0:0[v_final]`);
+        filterParts.push(`[${overlayIndex}:v]scale=${width}:${height}[logo]`);
+        filterParts.push(`[${currentV}][logo]overlay=0:0[v_overlay]`);
       } else if (isDestino) {
-        filterParts.push(`[2:v]scale=${width}:-1[logo]`);
-        filterParts.push(`[${currentV}][logo]overlay=0:H-h:enable='gte(t,${showLogoFrom})'[v_final]`);
+        filterParts.push(`[${overlayIndex}:v]scale=${width}:-1[logo]`);
+        filterParts.push(`[${currentV}][logo]overlay=0:H-h:enable='gte(t,${showLogoFrom})'[v_overlay]`);
       } else {
-        filterParts.push(`[2:v]scale=350:-1[logo]`);
-        filterParts.push(`[${currentV}][logo]overlay=(W-w)/2:40:enable='gte(t,${showLogoFrom})'[v_final]`);
+        filterParts.push(`[${overlayIndex}:v]scale=350:-1[logo]`);
+        filterParts.push(`[${currentV}][logo]overlay=(W-w)/2:40:enable='gte(t,${showLogoFrom})'[v_overlay]`);
       }
-      currentV = "v_final";
+      currentV = "v_overlay";
+    }
+
+    // 4. ADICIONADO: Aplicação do filtro da Marca D'água por cima de tudo
+    if (watermarkIndex !== -1) {
+      filterParts.push(`[${watermarkIndex}:v]scale=${width}:${height}[wm]`);
+      filterParts.push(`[${currentV}][wm]overlay=0:0[v_watermark]`);
+      currentV = "v_watermark"; // Atualiza a variável para o output final ser salvo com a marca
     }
 
     let videoMap = "0:v:0";
@@ -215,7 +235,6 @@ const worker = new Worker("video-processing", async (job) => {
 
     finalArgs.push("-map", videoMap, "-map", "1:a:0");
 
-    // Limite de tempo (30 segundos para estático, corte no áudio para os outros)
     if (isEstatico) {
       finalArgs.push("-t", "30"); 
     } else {
@@ -311,12 +330,10 @@ app.get("/api/tripadvisor", async (req, res) => {
   const apiKey = process.env.TRIPADVISOR_API_KEY;
   if (!apiKey) return res.status(500).json({ error: "TRIPADVISOR_API_KEY não configurada no servidor" });
 
-  // Terra API — nova plataforma (substitui api.content.tripadvisor.com)
   const BASE = "https://terra.tripadvisor.com/api";
   const taHeaders = { accept: "application/json", "X-API-Key": apiKey };
 
   try {
-    // Passo 1: localizar o hotel pelo nome
     const searchRes = await axios.get(`${BASE}/locations/search`, {
       params: { query, category: "HOTEL", locale: "pt-BR", size: 5 },
       headers: taHeaders,
@@ -329,7 +346,6 @@ app.get("/api/tripadvisor", async (req, res) => {
 
     const nearbyParams = { location_id: locationId, radius: 8, unit: "KM", size: 20, locale: "pt-BR" };
 
-    // Passos 2-4 em paralelo: fotos + restaurantes próximos + atrações próximas
     const [photosRes, restaurantsRes, attractionsRes] = await Promise.all([
       axios.get(`${BASE}/locations/${locationId}/photos`, {
         params: { size: 50 },
@@ -344,11 +360,6 @@ app.get("/api/tripadvisor", async (req, res) => {
         headers: taHeaders,
       }),
     ]);
-
-    console.log("[TripAdvisor] Qtd fotos recebidas:", photosRes.data?.data?.length);
-    console.log("[TripAdvisor] RAW Photo[0]:", JSON.stringify(photosRes.data?.data?.[0]));
-    console.log("[TripAdvisor] Restaurantes próximos:", restaurantsRes.data?.data?.length);
-    console.log("[TripAdvisor] Atrações próximas:", attractionsRes.data?.data?.length);
 
     const photos = (photosRes.data?.data ?? [])
       .map((item) => ({
@@ -370,16 +381,8 @@ app.get("/api/tripadvisor", async (req, res) => {
     const restaurants = parseNearby(restaurantsRes.data?.data);
     const attractions = parseNearby(attractionsRes.data?.data);
 
-    console.log("[TripAdvisor] Restaurantes parseados:", JSON.stringify(restaurants));
-    console.log("[TripAdvisor] Atrações parseadas:", JSON.stringify(attractions));
-
     res.json({ data: photos, restaurants, attractions });
   } catch (err) {
-    if (err.response) {
-      console.error("[TripAdvisor proxy erro real]:", JSON.stringify(err.response.data));
-    } else {
-      console.error("[TripAdvisor proxy erro mensagem]:", err.message);
-    }
     res.status(502).json({ error: `Erro ao consultar TripAdvisor: ${err.message}` });
   }
 });
