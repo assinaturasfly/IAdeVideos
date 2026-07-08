@@ -257,6 +257,7 @@ const worker = new Worker("video-processing", async (job) => {
       const { data: configData } = await executeWithRetry(() => 
         axios.get(`${SUPABASE_URL}/rest/v1/app_config?key=eq.google_drive_refresh_token&select=value`, {
           headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+          'Accept-Profile': 'viral'
         })
       );
       
