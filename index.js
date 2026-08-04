@@ -81,7 +81,6 @@ app.post("/render", async (req, res) => {
 
   const { job_id, broll_urls, audio_url } = req.body;
   
-  // Alteração 1: Não obriga mais a ter audio_url para aceitar o job
   if (!job_id) return res.status(400).json({ error: "job_id ausente" });
 
   const job = await videoQueue.add("render-job", req.body, { 
@@ -95,7 +94,6 @@ app.post("/render", async (req, res) => {
 });
 
 const worker = new Worker("video-processing", async (job) => {
-  // 1. ADICIONADO: watermark_url desestruturado
   const { job_id, audio_url, webhook_url, webhook_secret, logo_url, overlay_image_url, tipo_video, watermark_url } = job.data;
   const workDir = path.join("/tmp", "video-worker", job_id);
   const output_config = job.data.output_config || {};
@@ -110,7 +108,6 @@ const worker = new Worker("video-processing", async (job) => {
     const outputPath = path.join(workDir, "output.mp4");
     const srtPath = path.join(workDir, "subs.srt");
 
-    // Alteração 2: Lógica robusta para detectar se há áudio e pular o download se não houver
     const isSilenceMp3 = !audio_url || audio_url === "silence" || (typeof audio_url === 'string' && audio_url.includes("silence.mp3"));
     let duration = 0;
     
@@ -163,7 +160,6 @@ const worker = new Worker("video-processing", async (job) => {
 
     const finalArgs = ["-stream_loop", "-1", "-f", "concat", "-safe", "0", "-i", playlistPath];
     
-    // Alteração 3: Inserção do áudio (ou trilha silenciosa) em vídeos dinâmicos ou estáticos
     if (isEstatico) {
       if (isSilenceMp3) {
         finalArgs.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100");
@@ -178,8 +174,7 @@ const worker = new Worker("video-processing", async (job) => {
       }
     }
 
-    // 2. ADICIONADO: Lógica de índices dinâmicos para suportar overlay + watermark
-    let inputIndex = 2; // 0 é o video base, 1 é o audio. Os próximos começam do 2.
+    let inputIndex = 2;
     
     const overlayImg = overlay_image_url || logo_url;
     let overlayIndex = -1;
@@ -189,7 +184,6 @@ const worker = new Worker("video-processing", async (job) => {
       overlayIndex = inputIndex++;
     }
 
-    // 3. ADICIONADO: Download da Marca d'água, se enviada pelo backend
     let watermarkIndex = -1;
     if (watermark_url) {
       console.log(`📦 [JOB ${job_id}] Baixando Marca D'água...`);
@@ -233,11 +227,10 @@ const worker = new Worker("video-processing", async (job) => {
       currentV = "v_overlay";
     }
 
-    // 4. ADICIONADO: Aplicação do filtro da Marca D'água por cima de tudo
     if (watermarkIndex !== -1) {
       filterParts.push(`[${watermarkIndex}:v]scale=${width}:${height}[wm]`);
       filterParts.push(`[${currentV}][wm]overlay=0:0[v_watermark]`);
-      currentV = "v_watermark"; // Atualiza a variável para o output final ser salvo com a marca
+      currentV = "v_watermark";
     }
 
     let videoMap = "0:v:0";
@@ -248,10 +241,15 @@ const worker = new Worker("video-processing", async (job) => {
 
     finalArgs.push("-map", videoMap, "-map", "1:a:0");
 
+    // Correção: quando for vídeo mudo (isSilenceMp3), utiliza -t totalVideoLength em vez de -shortest para evitar loop infinito de renderização
     if (isEstatico) {
       finalArgs.push("-t", "30"); 
     } else {
-      finalArgs.push("-shortest");
+      if (isSilenceMp3) {
+        finalArgs.push("-t", totalVideoLength.toString());
+      } else {
+        finalArgs.push("-shortest");
+      }
     }
 
     finalArgs.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p", "-threads", "2", outputPath);
