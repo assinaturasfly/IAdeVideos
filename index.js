@@ -254,7 +254,7 @@ const worker = new Worker("video-processing", async (job) => {
       finalArgs.push("-shortest");
     }
 
-    finalArgs.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p", outputPath);
+    finalArgs.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p", "-threads", "2", outputPath);
 
     await runFfmpeg(finalArgs, "Renderização Final");
 
