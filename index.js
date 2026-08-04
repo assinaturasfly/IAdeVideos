@@ -80,7 +80,9 @@ app.post("/render", async (req, res) => {
   console.log("📥 DADOS RECEBIDOS NA PORTA DE ENTRADA:", JSON.stringify(req.body, null, 2));
 
   const { job_id, broll_urls, audio_url } = req.body;
-  if (!job_id || !audio_url) return res.status(400).json({ error: "Dados ausentes" });
+  
+  // Alteração 1: Não obriga mais a ter audio_url para aceitar o job
+  if (!job_id) return res.status(400).json({ error: "job_id ausente" });
 
   const job = await videoQueue.add("render-job", req.body, { 
     removeOnComplete: true, 
@@ -108,9 +110,17 @@ const worker = new Worker("video-processing", async (job) => {
     const outputPath = path.join(workDir, "output.mp4");
     const srtPath = path.join(workDir, "subs.srt");
 
-    console.log(`📦 [JOB ${job_id}] Baixando áudio...`);
-    await downloadToFile(audio_url, audioPath);
-    const duration = await getMediaDuration(audioPath);
+    // Alteração 2: Lógica robusta para detectar se há áudio e pular o download se não houver
+    const isSilenceMp3 = !audio_url || audio_url === "silence" || (typeof audio_url === 'string' && audio_url.includes("silence.mp3"));
+    let duration = 0;
+    
+    if (!isSilenceMp3) {
+      console.log(`📦 [JOB ${job_id}] Baixando áudio...`);
+      await downloadToFile(audio_url, audioPath);
+      duration = await getMediaDuration(audioPath);
+    } else {
+      console.log(`🔇 [JOB ${job_id}] Modo sem áudio. Pulando download de narração.`);
+    }
 
     const broll_urls = job.data.broll_urls || [];
     const downloadedClips = [];
@@ -153,8 +163,7 @@ const worker = new Worker("video-processing", async (job) => {
 
     const finalArgs = ["-stream_loop", "-1", "-f", "concat", "-safe", "0", "-i", playlistPath];
     
-    const isSilenceMp3 = audio_url && audio_url.includes("silence.mp3");
-
+    // Alteração 3: Inserção do áudio (ou trilha silenciosa) em vídeos dinâmicos ou estáticos
     if (isEstatico) {
       if (isSilenceMp3) {
         finalArgs.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100");
@@ -162,7 +171,11 @@ const worker = new Worker("video-processing", async (job) => {
         finalArgs.push("-stream_loop", "-1", "-i", audioPath);
       }
     } else {
-      finalArgs.push("-i", audioPath);
+      if (isSilenceMp3) {
+        finalArgs.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100");
+      } else {
+        finalArgs.push("-i", audioPath);
+      }
     }
 
     // 2. ADICIONADO: Lógica de índices dinâmicos para suportar overlay + watermark
