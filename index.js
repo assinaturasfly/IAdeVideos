@@ -140,7 +140,7 @@ const worker = new Worker("video-processing", async (job) => {
 
     for (let i = 0; i < downloadedClips.length; i++) {
       const normPath = path.join(workDir, `slice_${i}.mp4`);
-      await runFfmpeg(["-ss", "0", "-t", "5", "-i", downloadedClips[i], "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-an", normPath], `Corte Clipe ${i+1}`);
+      await runFfmpeg(["-ss", "0", "-t", "5", "-i", downloadedClips[i], "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-threads", "2", "-an", normPath], `Corte Clipe ${i+1}`);
       normalizedClips.push(normPath);
     }
 
