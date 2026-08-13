@@ -137,7 +137,23 @@ const worker = new Worker("video-processing", async (job) => {
 
     for (let i = 0; i < downloadedClips.length; i++) {
       const normPath = path.join(workDir, `slice_${i}.mp4`);
-      await runFfmpeg(["-ss", "0", "-t", "5", "-i", downloadedClips[i], "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-threads", "2", "-an", normPath], `Corte Clipe ${i+1}`);
+      let sliceArgs = ["-ss", "0"];
+
+      if (downloadedClips.length > 1) {
+        // MAIS DE UM VÍDEO: mantém a regra de 5 segundos
+        sliceArgs.push("-t", "5");
+      } else {
+        // APENAS UM VÍDEO: 
+        if (duration > 0) {
+          // Se tiver áudio, usa a duração do áudio
+          sliceArgs.push("-t", duration.toString());
+        }
+        // Se duration for 0 (mudo), não coloca limite agora, pega o vídeo todo.
+      }
+
+      sliceArgs.push("-i", downloadedClips[i], "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-threads", "2", "-an", normPath);
+      
+      await runFfmpeg(sliceArgs, `Corte Clipe ${i+1}`);
       normalizedClips.push(normPath);
     }
 
@@ -192,7 +208,17 @@ const worker = new Worker("video-processing", async (job) => {
       watermarkIndex = inputIndex++;
     }
 
-    const totalVideoLength = duration > 0 ? duration : normalizedClips.length * 5;
+    let totalVideoLength = duration;
+    if (totalVideoLength === 0) {
+      if (downloadedClips.length === 1) {
+        // Se for um vídeo só e for mudo, pega a duração real do vídeo
+        totalVideoLength = await getMediaDuration(downloadedClips[0]);
+      } else {
+        // Se forem vários vídeos mudos, multiplica por 5s
+        totalVideoLength = normalizedClips.length * 5;
+      }
+    }
+    
     const isAlwaysOn = job.data.logo_always_on === true;
     const showLogoFrom = isAlwaysOn ? 0 : Math.max(0, totalVideoLength - 3);
 
