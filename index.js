@@ -94,6 +94,9 @@ app.post("/render", async (req, res) => {
 });
 
 const worker = new Worker("video-processing", async (job) => {
+  // 👇 AQUI ESTÁ O LOG NOVO INJETADO
+  console.log(`\n⚙️ [WORKER] Pegou o JOB da fila! Iniciando processamento do Vídeo ID: ${job.data.job_id}`);
+
   const { job_id, audio_url, webhook_url, webhook_secret, logo_url, overlay_image_url, tipo_video, watermark_url } = job.data;
   const workDir = path.join("/tmp", "video-worker", job_id);
   const output_config = job.data.output_config || {};
@@ -140,15 +143,11 @@ const worker = new Worker("video-processing", async (job) => {
       let sliceArgs = ["-ss", "0"];
 
       if (downloadedClips.length > 1) {
-        // MAIS DE UM VÍDEO: mantém a regra de 5 segundos
         sliceArgs.push("-t", "5");
       } else {
-        // APENAS UM VÍDEO: 
         if (duration > 0) {
-          // Se tiver áudio, usa a duração do áudio
           sliceArgs.push("-t", duration.toString());
         }
-        // Se duration for 0 (mudo), não coloca limite agora, pega o vídeo todo.
       }
 
       sliceArgs.push("-i", downloadedClips[i], "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-threads", "2", "-an", normPath);
@@ -211,10 +210,8 @@ const worker = new Worker("video-processing", async (job) => {
     let totalVideoLength = duration;
     if (totalVideoLength === 0) {
       if (downloadedClips.length === 1) {
-        // Se for um vídeo só e for mudo, pega a duração real do vídeo
         totalVideoLength = await getMediaDuration(downloadedClips[0]);
       } else {
-        // Se forem vários vídeos mudos, multiplica por 5s
         totalVideoLength = normalizedClips.length * 5;
       }
     }
@@ -267,7 +264,6 @@ const worker = new Worker("video-processing", async (job) => {
 
     finalArgs.push("-map", videoMap, "-map", "1:a:0");
 
-    // Correção: quando for vídeo mudo (isSilenceMp3), utiliza -t totalVideoLength em vez de -shortest para evitar loop infinito de renderização
     if (isEstatico) {
       finalArgs.push("-t", "30"); 
     } else {
@@ -447,6 +443,19 @@ app.get("/api/proxy-image", async (req, res) => {
     console.error("[proxy-image] Erro:", err.message);
     res.status(502).json({ error: `Falha ao buscar imagem: ${err.message}` });
   }
+});
+
+// 👇 AQUI ESTÃO OS RASTREADORES (LISTENERS) DO BULLMQ
+worker.on("active", (job) => {
+  console.log(`🟢 [BULLMQ] Job ${job.id} entrou em status ATIVO!`);
+});
+
+worker.on("failed", (job, err) => {
+  console.error(`❌ [BULLMQ] Job ${job.id} FALHOU na fila:`, err.message);
+});
+
+worker.on("error", (err) => {
+  console.error(`🚨 [BULLMQ] Erro interno ou queda de conexão no Worker:`, err.message);
 });
 
 app.get("/", (req, res) => res.send("🚀 Worker de Vídeo Ativo"));
