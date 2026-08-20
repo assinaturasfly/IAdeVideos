@@ -22,7 +22,7 @@ const REDIS_URL = process.env.REDIS_URL;
 
 const connection = new IORedis(REDIS_URL, { maxRetriesPerRequest: null });
 const videoQueue = new Queue("video-processing", { connection });
-videoQueue.obliterate({ force: true }).catch(() => {});
+//videoQueue.obliterate({ force: true }).catch(() => {});
 
 async function executeWithRetry(action, maxTentativas = 3) {
   for (let tentativa = 1; tentativa <= maxTentativas; tentativa++) {
