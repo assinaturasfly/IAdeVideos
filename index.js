@@ -66,17 +66,30 @@ async function downloadToFile(url, filePath) {
       const w = fs.createWriteStream(filePath);
       r.data.pipe(w);
       
-      w.on("finish", resolve);
-      w.on("error", reject);
-      r.data.on("error", reject);
-      
-      r.data.setTimeout(30000, () => {
-        r.data.destroy();
-        reject(new Error("Timeout a receber os dados da rede"));
-      });
+      // Usa o timer nativo do Node.js, totalmente à prova de falhas
+      const idleTimer = setTimeout(() => {
+        if (r.data && typeof r.data.destroy === 'function') {
+          r.data.destroy();
+        }
+        reject(new Error("Timeout de inatividade recebendo dados da rede"));
+      }, 30000);
+
+      const cleanupAndResolve = () => {
+        clearTimeout(idleTimer);
+        resolve();
+      };
+
+      const cleanupAndReject = (err) => {
+        clearTimeout(idleTimer);
+        reject(err);
+      };
+
+      w.on("finish", cleanupAndResolve);
+      w.on("error", cleanupAndReject);
+      r.data.on("error", cleanupAndReject);
     });
   } catch (error) {
-    throw new Error(`Falha no download da rede: ${error.message}`);
+    throw new Error(`Falha na rede: ${error.message}`);
   }
 }
 
