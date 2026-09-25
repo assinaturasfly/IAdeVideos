@@ -24,43 +24,60 @@ const connection = new IORedis(REDIS_URL, { maxRetriesPerRequest: null });
 const videoQueue = new Queue("video-processing", { connection });
 //videoQueue.obliterate({ force: true }).catch(() => {});
 
-async function executeWithRetry(action, maxTentativas = 3) {
+async function executeWithRetry(action, maxTentativas = 3, logContext = "Sistema") {
   for (let tentativa = 1; tentativa <= maxTentativas; tentativa++) {
     try {
       return await action();
     } catch (error) {
       if (tentativa === maxTentativas) throw error;
       const delay = 1000 * Math.pow(2, tentativa);
-      console.warn(`⚠️ Falha na tentativa ${tentativa} (${error.message}). Retentando em ${delay}ms...`);
+      console.warn(`[RETRY][${logContext}] ⚠️ Falha na tentativa ${tentativa} (${error.message}). Retentando em ${delay}ms...`);
       await new Promise(r => setTimeout(r, delay));
     }
   }
 }
 
-function runFfmpeg(args, stepName = "Processando") {
+// O jobId foi adicionado para podermos rastrear exatamente de qual vídeo é o processo
+function runFfmpeg(args, stepName = "Processando", jobId = "SYS") {
   return new Promise((resolve, reject) => {
     const finalArgs = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", ...args];
-    console.log(`⏳ [FFMPEG] Iniciando: ${stepName}...`);
+    console.log(`[FFMPEG][${jobId}] ⏳ Iniciando: ${stepName}...`);
+    
     const p = spawn("ffmpeg", finalArgs);
-    p.stderr.on("data", (data) => console.error(`❌ [ERRO FFMPEG]: ${data}`));
+    let errorLog = ""; // Acumula erros para não sujar a log com chunks
+    
+    p.stderr.on("data", (data) => errorLog += data.toString());
+    
     p.on("close", (code) => {
       if (code === 0) {
-        console.log(`✅ [SUCESSO]: ${stepName} concluído.`);
+        console.log(`[FFMPEG][${jobId}] ✅ Concluído: ${stepName}`);
         return resolve();
       }
+      console.error(`[FFMPEG][${jobId}] ❌ Falha no passo '${stepName}' (Código ${code}). Detalhe: ${errorLog.trim()}`);
       reject(new Error(`${stepName} falhou com código ${code}`));
     });
   });
 }
 
 async function downloadToFile(url, filePath) {
-  const r = await axios({ url, responseType: "stream", timeout: 120000 });
-  await new Promise((resolve, reject) => {
-    const w = fs.createWriteStream(filePath);
-    r.data.pipe(w);
-    w.on("finish", resolve);
-    w.on("error", reject);
-  });
+  try {
+    const r = await axios({ url, responseType: "stream", timeout: 60000 });
+    await new Promise((resolve, reject) => {
+      const w = fs.createWriteStream(filePath);
+      r.data.pipe(w);
+      
+      w.on("finish", resolve);
+      w.on("error", reject);
+      r.data.on("error", reject);
+      
+      r.data.setTimeout(30000, () => {
+        r.data.destroy();
+        reject(new Error("Timeout a receber os dados da rede"));
+      });
+    });
+  } catch (error) {
+    throw new Error(`Falha no download da rede: ${error.message}`);
+  }
 }
 
 async function getMediaDuration(filePath) {
@@ -77,11 +94,15 @@ async function getMediaDuration(filePath) {
 }
 
 app.post("/render", async (req, res) => {
-  console.log("📥 DADOS RECEBIDOS NA PORTA DE ENTRADA:", JSON.stringify(req.body, null, 2));
-
   const { job_id, broll_urls, audio_url } = req.body;
   
-  if (!job_id) return res.status(400).json({ error: "job_id ausente" });
+  if (!job_id) {
+    console.warn("[API] ⚠️ Tentativa de render bloqueada: job_id ausente no payload.");
+    return res.status(400).json({ error: "job_id ausente" });
+  }
+
+  // Log compacta numa única linha
+  console.log(`[API][${job_id}] 📥 Requisição recebida com ${broll_urls?.length || 0} clips.`);
 
   const job = await videoQueue.add("render-job", req.body, { 
     removeOnComplete: true, 
@@ -89,15 +110,16 @@ app.post("/render", async (req, res) => {
     attempts: 2,
     backoff: { type: "fixed", delay: 5000 }
   });
-  console.log(`🚀 [FILA] Novo vídeo recebido! ID: ${job_id}`);
+  
+  console.log(`[FILA][${job_id}] 🚀 Job inserido na fila do BullMQ com sucesso.`);
   res.json({ status: "queued", job_id });
 });
 
 const worker = new Worker("video-processing", async (job) => {
-  // 👇 AQUI ESTÁ O LOG NOVO INJETADO
-  console.log(`\n⚙️ [WORKER] Pegou o JOB da fila! Iniciando processamento do Vídeo ID: ${job.data.job_id}`);
-
   const { job_id, audio_url, webhook_url, webhook_secret, logo_url, overlay_image_url, tipo_video, watermark_url } = job.data;
+  
+  console.log(`[WORKER][${job_id}] ⚙️ Processamento iniciado (Tipo: ${tipo_video || 'padrão'}).`);
+
   const workDir = path.join("/tmp", "video-worker", job_id);
   const output_config = job.data.output_config || {};
   const width = output_config.width || 720;
@@ -115,16 +137,18 @@ const worker = new Worker("video-processing", async (job) => {
     let duration = 0;
     
     if (!isSilenceMp3) {
-      console.log(`📦 [JOB ${job_id}] Baixando áudio...`);
+      console.log(`[WORKER][${job_id}] 📦 Descarregando ficheiro de áudio...`);
       await downloadToFile(audio_url, audioPath);
       duration = await getMediaDuration(audioPath);
+      console.log(`[WORKER][${job_id}] 🎵 Duração do áudio: ${duration}s`);
     } else {
-      console.log(`🔇 [JOB ${job_id}] Modo sem áudio. Pulando download de narração.`);
+      console.log(`[WORKER][${job_id}] 🔇 Modo sem áudio. Pulando download.`);
     }
 
     const broll_urls = job.data.broll_urls || [];
     const downloadedClips = [];
 
+    console.log(`[WORKER][${job_id}] 📦 Descarregando ${broll_urls.length} clip(s) de vídeo...`);
     for (let i = 0; i < broll_urls.length; i++) {
       const p = path.join(workDir, `raw_${i}.mp4`);
       await downloadToFile(broll_urls[i], p);
@@ -145,14 +169,12 @@ const worker = new Worker("video-processing", async (job) => {
       if (downloadedClips.length > 1) {
         sliceArgs.push("-t", "5");
       } else {
-        if (duration > 0) {
-          sliceArgs.push("-t", duration.toString());
-        }
+        if (duration > 0) sliceArgs.push("-t", duration.toString());
       }
 
       sliceArgs.push("-i", downloadedClips[i], "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-threads", "2", "-an", normPath);
       
-      await runFfmpeg(sliceArgs, `Corte Clipe ${i+1}`);
+      await runFfmpeg(sliceArgs, `Normalização Clipe ${i+1}`, job_id);
       normalizedClips.push(normPath);
     }
 
@@ -165,6 +187,7 @@ const worker = new Worker("video-processing", async (job) => {
 
     if (!isEstatico) {
       if (subtitle_url) {
+        console.log(`[WORKER][${job_id}] 📝 Descarregando legendas...`);
         await downloadToFile(subtitle_url, srtPath);
         activeSubtitlePath = srtPath;
       } else if (subtitle_text) {
@@ -201,7 +224,7 @@ const worker = new Worker("video-processing", async (job) => {
 
     let watermarkIndex = -1;
     if (watermark_url) {
-      console.log(`📦 [JOB ${job_id}] Baixando Marca D'água...`);
+      console.log(`[WORKER][${job_id}] 📦 Descarregando Marca D'água...`);
       await downloadToFile(watermark_url, path.join(workDir, "watermark.png"));
       finalArgs.push("-i", path.join(workDir, "watermark.png"));
       watermarkIndex = inputIndex++;
@@ -276,14 +299,14 @@ const worker = new Worker("video-processing", async (job) => {
 
     finalArgs.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p", "-threads", "2", outputPath);
 
-    await runFfmpeg(finalArgs, "Renderização Final");
+    await runFfmpeg(finalArgs, "Renderização Final", job_id);
 
-    console.log("🧘‍♂️ Dando um respiro de 10 segundos para o servidor recuperar a rede...");
+    console.log(`[WORKER][${job_id}] 🧘‍♂️ Pausa de 10s para estabilização de rede...`);
     await new Promise(r => setTimeout(r, 10000));
 
     let finalVideoUrl = "";
     try {
-      console.log(`🔍 [DRIVE] Buscando token no Supabase...`);
+      console.log(`[WORKER][${job_id}] 🔍 Buscando credenciais do Google Drive...`);
       const SUPABASE_URL = process.env.SUPABASE_URL;
       const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
       
@@ -294,11 +317,11 @@ const worker = new Worker("video-processing", async (job) => {
             'Authorization': `Bearer ${SUPABASE_KEY}`,
             'Accept-Profile': 'viral'
           }
-        })
+        }), 3, job_id
       );
       
       const refreshToken = configData[0]?.value || process.env.GOOGLE_REFRESH_TOKEN;
-      if (!refreshToken) throw new Error("Token não encontrado no banco nem nas variáveis.");
+      if (!refreshToken) throw new Error("Token não encontrado.");
 
       const clientId = process.env.GOOGLE_CLIENT_ID;
       const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
@@ -312,40 +335,41 @@ const worker = new Worker("video-processing", async (job) => {
           grant_type: "refresh_token"
         }).toString(), {
           headers: { "Content-Type": "application/x-www-form-urlencoded" }
-        })
+        }), 3, job_id
       );
 
       const oauth2Client = new google.auth.OAuth2();
       oauth2Client.setCredentials({ access_token: tokenRes.data.access_token });
       const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
+      console.log(`[WORKER][${job_id}] ☁️ A enviar vídeo para o Google Drive...`);
       const response = await executeWithRetry(() => drive.files.create({
         requestBody: { name: `video_${job_id}.mp4`, parents: [folderId] },
         media: { mimeType: 'video/mp4', body: fs.createReadStream(outputPath) },
         fields: 'id, webViewLink'
-      }));
+      }), 3, job_id);
 
       await executeWithRetry(() => 
         axios.post(`https://www.googleapis.com/drive/v3/files/${response.data.id}/permissions`, 
         { role: 'reader', type: 'anyone' },
         { headers: { Authorization: `Bearer ${tokenRes.data.access_token}` } }
-        )
+        ), 3, job_id
       );
 
       finalVideoUrl = response.data.webViewLink;
-      console.log(`✅ [DRIVE] Link permanente gerado: ${finalVideoUrl}`);
+      console.log(`[WORKER][${job_id}] ✅ Upload concluído: ${finalVideoUrl}`);
 
     } catch (err) {
-      console.error("❌ Erro ao subir no Drive.", err.message);
+      console.error(`[WORKER][${job_id}] ⚠️ Falha no Drive, a usar URL local. Motivo: ${err.message}`);
       const serverUrl = process.env.RENDER_EXTERNAL_URL || `https://${process.env.RENDER_HOSTNAME}`;
       finalVideoUrl = `${serverUrl}/videos/${job_id}/output.mp4`;
     }
 
     await axios.post(webhook_url, { job_id, status: "completed", video_url: finalVideoUrl }, { headers: { "x-webhook-secret": webhook_secret } });
-    console.log(`✨ [JOB ${job_id}] FINALIZADO COM SUCESSO!`);
+    console.log(`[WORKER][${job_id}] ✨ JOB FINALIZADO COM SUCESSO!`);
 
   } catch (e) {
-    console.error(`💥 [JOB ${job_id}] ERRO CRÍTICO:`, e.message);
+    console.error(`[WORKER][${job_id}] 💥 ERRO CRÍTICO NO JOB: ${e.message}`);
     await axios.post(webhook_url, { job_id, status: "failed", error: e.message }, { headers: { "x-webhook-secret": webhook_secret } });
   } finally {
     setTimeout(() => {
@@ -359,22 +383,24 @@ const worker = new Worker("video-processing", async (job) => {
   lockRenewTime: 120000 
 });
 
-// ── Proxy TripAdvisor Terra API (evita bloqueio de CORS no browser) ─────────
+// Proxy TripAdvisor Terra API
 app.get("/api/tripadvisor", async (req, res) => {
   const query = String(req.query.query ?? "").trim();
   if (!query) return res.status(400).json({ error: "Parâmetro 'query' obrigatório" });
 
   const apiKey = process.env.TRIPADVISOR_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: "TRIPADVISOR_API_KEY não configurada no servidor" });
+  if (!apiKey) return res.status(500).json({ error: "TRIPADVISOR_API_KEY ausente" });
 
   const BASE = "https://terra.tripadvisor.com/api";
   const taHeaders = { accept: "application/json", "X-API-Key": apiKey };
 
   try {
+    console.log(`[PROXY][TripAdvisor] Nova busca por: ${query}`);
     const searchRes = await axios.get(`${BASE}/locations/search`, {
       params: { query, category: "HOTEL", locale: "pt-BR", size: 5 },
       headers: taHeaders,
     });
+    // O resto mantém-se igual (omitido processamento longo para manter limpo, mas mantendo a estrutura que já estava correta)
     const locations = searchRes.data?.data ?? [];
     if (!locations.length) return res.json({ data: [], restaurants: [], attractions: [] });
 
@@ -384,27 +410,16 @@ app.get("/api/tripadvisor", async (req, res) => {
     const nearbyParams = { location_id: locationId, radius: 8, unit: "KM", size: 20, locale: "pt-BR" };
 
     const [photosRes, restaurantsRes, attractionsRes] = await Promise.all([
-      axios.get(`${BASE}/locations/${locationId}/photos`, {
-        params: { size: 50 },
-        headers: taHeaders,
-      }),
-      axios.get(`${BASE}/locations/nearby`, {
-        params: { ...nearbyParams, category: "RESTAURANT" },
-        headers: taHeaders,
-      }),
-      axios.get(`${BASE}/locations/nearby`, {
-        params: { ...nearbyParams, category: "ATTRACTION" },
-        headers: taHeaders,
-      }),
+      axios.get(`${BASE}/locations/${locationId}/photos`, { params: { size: 50 }, headers: taHeaders }),
+      axios.get(`${BASE}/locations/nearby`, { params: { ...nearbyParams, category: "RESTAURANT" }, headers: taHeaders }),
+      axios.get(`${BASE}/locations/nearby`, { params: { ...nearbyParams, category: "ATTRACTION" }, headers: taHeaders })
     ]);
 
-    const photos = (photosRes.data?.data ?? [])
-      .map((item) => ({
-        id:    String(item.id ?? ""),
-        url:   item.photo?.original_size_url ?? "",
-        thumb: item.photo?.original_size_url ?? "",
-      }))
-      .filter((p) => p.url);
+    const photos = (photosRes.data?.data ?? []).map((item) => ({
+      id: String(item.id ?? ""),
+      url: item.photo?.original_size_url ?? "",
+      thumb: item.photo?.original_size_url ?? "",
+    })).filter((p) => p.url);
 
     const parseNearby = (items) => (items ?? []).map((item) => {
       const names = item.location?.names ?? [];
@@ -415,16 +430,14 @@ app.get("/api/tripadvisor", async (req, res) => {
       return { name, category, distance_km };
     }).filter((r) => r.name);
 
-    const restaurants = parseNearby(restaurantsRes.data?.data);
-    const attractions = parseNearby(attractionsRes.data?.data);
-
-    res.json({ data: photos, restaurants, attractions });
+    res.json({ data: photos, restaurants: parseNearby(restaurantsRes.data?.data), attractions: parseNearby(attractionsRes.data?.data) });
   } catch (err) {
-    res.status(502).json({ error: `Erro ao consultar TripAdvisor: ${err.message}` });
+    console.error(`[PROXY][TripAdvisor] ❌ Erro: ${err.message}`);
+    res.status(502).json({ error: `Erro na API: ${err.message}` });
   }
 });
 
-// ── Proxy de imagem (evita CORS no canvas do html-to-image) ─────────────────
+// Proxy de imagem
 app.get("/api/proxy-image", async (req, res) => {
   const url = String(req.query.url ?? "").trim();
   if (!url) return res.status(400).json({ error: "Parâmetro 'url' obrigatório" });
@@ -434,29 +447,29 @@ app.get("/api/proxy-image", async (req, res) => {
       timeout: 15000,
       headers: { "User-Agent": "Mozilla/5.0 (compatible; ViralFlux/1.0)" },
     });
-    const contentType = response.headers["content-type"] || "image/jpeg";
-    res.set("Access-Control-Allow-Origin", "*");
-    res.set("Content-Type", contentType);
-    res.set("Cache-Control", "public, max-age=86400");
+    res.set({
+      "Access-Control-Allow-Origin": "*",
+      "Content-Type": response.headers["content-type"] || "image/jpeg",
+      "Cache-Control": "public, max-age=86400"
+    });
     res.send(Buffer.from(response.data));
   } catch (err) {
-    console.error("[proxy-image] Erro:", err.message);
+    console.error(`[PROXY][Imagem] ❌ Erro ao buscar ${url}: ${err.message}`);
     res.status(502).json({ error: `Falha ao buscar imagem: ${err.message}` });
   }
 });
 
-// 👇 AQUI ESTÃO OS RASTREADORES (LISTENERS) DO BULLMQ
 worker.on("active", (job) => {
-  console.log(`🟢 [BULLMQ] Job ${job.id} entrou em status ATIVO!`);
+  console.log(`[BULLMQ][${job.id}] 🟢 Estado: ATIVO na Fila`);
 });
 
 worker.on("failed", (job, err) => {
-  console.error(`❌ [BULLMQ] Job ${job.id} FALHOU na fila:`, err.message);
+  console.error(`[BULLMQ][${job.id}] ❌ Estado: FALHOU (${err.message})`);
 });
 
 worker.on("error", (err) => {
-  console.error(`🚨 [BULLMQ] Erro interno ou queda de conexão no Worker:`, err.message);
+  console.error(`[BULLMQ][SYS] 🚨 Erro de Conexão no Worker: ${err.message}`);
 });
 
 app.get("/", (req, res) => res.send("🚀 Worker de Vídeo Ativo"));
-app.listen(PORT, () => console.log(`🚀 Worker de Vídeo Ativo na porta ${PORT}`));
+app.listen(PORT, () => console.log(`[SYSTEM] 🚀 Worker de Vídeo Ativo na porta ${PORT}`));
